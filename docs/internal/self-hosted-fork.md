@@ -136,6 +136,19 @@ re-adding if the deployment is ever rebuilt from scratch). Confirmed via
 `docker logs root-temporal-django-worker-1 | grep task_queue` showing
 `"task_queue": "max-ai-task-queue"` after the fix.
 
+**A second, related gap in the same merge**: fixing the task queue got Max as far as
+responding with "I'm unable to respond right now" instead of pure silence — progress, but
+still broken. The actual failure: `RuntimeError: personhog client not configured` in
+`posthog.personhog_client.client.personhog_call`, thrown from Max's `chat-agent` workflow
+activity when it looks up group types for the project. `web` and `worker` both set
+`PERSONHOG_ADDR: personhog-router:50052` and `PERSONHOG_ENABLED: 'true'` in
+`docker-compose.hobby.yml`; `temporal-django-worker`'s service definition in the same file
+never did — this looks like an upstream gap in the hobby compose file itself (affects any
+hobby deployment running Max, not something specific to this fork), exposed only because
+patch 1's task-queue fix let the workflow actually reach the personhog call. Fixed by adding
+both vars to `temporal-django-worker`'s `environment:` block in
+`docker-compose.override.yml`, alongside the task-queue `command:` override above.
+
 Update this table (add rows, change "Status", link the commit) every time a
 must-have patch is added, changed, or removed. Never delete a row silently —
 if a patch is retired, say why.
