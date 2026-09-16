@@ -144,20 +144,13 @@ services:
                         reverse_proxy objectstorage:19000
                     }
 
-                    # Self-hosted fork: admin and ops surfaces are restricted to an operator-configured
-                    # IP allowlist (ADMIN_ALLOWED_IPS in .env) — everything else (event ingestion, the
-                    # app UI, etc.) stays open. Localhost is always allowed so it never locks out local
-                    # dev or in-container debugging.
-                    @admin-restricted {
-                        not remote_ip 127.0.0.1 ::1 ${ADMIN_ALLOWED_IPS:-}
-                        path /admin
-                        path /admin/*
-                    }
-
-                    handle @admin-restricted {
-                        respond 403
-                    }
-
+                    # Self-hosted fork: the app itself (root, login, dashboard, /admin, API, everything
+                    # not already matched above) is restricted to an operator-configured IP allowlist
+                    # (ADMIN_ALLOWED_IPS in .env). Only the ingestion/public matchers above (capture,
+                    # replay, flags, surveys, webhooks, remote-config, objectstorage, livestream) stay
+                    # open to every IP, since tracked websites' visitors need to reach them from
+                    # anywhere. Localhost is always allowed so it never locks out local dev or
+                    # in-container debugging.
                     @temporal-ui {
                         path /temporal-ui
                         path /temporal-ui/
@@ -178,6 +171,14 @@ services:
                     handle @temporal-ui {
                         uri strip_prefix /temporal-ui
                         reverse_proxy temporal-ui:8080
+                    }
+
+                    @app-restricted {
+                        not remote_ip 127.0.0.1 ::1 ${ADMIN_ALLOWED_IPS:-}
+                    }
+
+                    handle @app-restricted {
+                        respond 403
                     }
 
                     handle {

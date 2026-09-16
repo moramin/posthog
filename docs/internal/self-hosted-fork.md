@@ -33,24 +33,42 @@ described, not necessarily the exact diff.
 | 1 | Remove `is_cloud` / billing / license gating (backend + frontend) | Self-hosted instance; every `AvailableFeature` should be unlocked and billing/license checks should not gate functionality. See the restriction table gathered during investigation for the full file list (`posthog/models/organization.py`, `posthog/utils.py`, `posthog/api/project.py`, `ee/billing/billing_manager.py`, `ee/api/billing.py`, `ee/api/license.py`, `posthog/tasks/sync_billing.py`, `posthog/tasks/usage_report.py`, `ee/tasks/send_license_usage.py`, `ee/api/subscription.py`, `products/tasks/backend/access.py`, `products/legal_documents/backend/logic/__init__.py`, `products/data_warehouse/.../data_warehouse.py`, `products/warehouse_sources/.../row_tracking.py`, `ee/partners/stripe/api/provisioning/*`, `ee/support_sidebar_max/max_search_tool.py`, `frontend/src/types.ts`, `frontend/src/scenes/userLogic.ts`, `frontend/src/lib/logic/featureFlagLogic.ts`). | Applied — `ee/partners/stripe/api/provisioning/*` (Stripe marketplace provisioning) and `ee/support_sidebar_max/max_search_tool.py` (Max support search) still make outbound calls with no self-hosted gate; both are patch #3 (no outbound calls) follow-ups, not feature gates. |
 | 2 | PostHog AI → OpenRouter only | All LLM calls from PostHog AI (`ee/hogai/...` and the legacy `ee/support_sidebar_max`) must route through OpenRouter, not directly to Anthropic. | **Satisfied by deploy config, no code diff** — see "PostHog AI provider routing" below. |
 | 3 | No outbound calls to PostHog's own services | Nothing in this deployment should call `*.posthog.com`, `*.i.posthog.com`, `posthogstatus.com`, or the license/billing/usage-report endpoints. | Applied — `posthog/settings/base_variables.py` (`OPT_OUT_CAPTURE` hardcoded `True`), `ee/support_sidebar_max/max_search_tool.py` (sitemap fetch skipped), `ee/partners/stripe/api/provisioning/{billing,services_catalog}.py` and every remaining outbound method on `ee/billing/billing_manager.py` (gated behind `is_cloud()`), `useAdblockDetection.ts` (probe skipped). `incidentStatusLogic.tsx`'s status-page poll and `region_proxy.py` were already self-hosted-safe. |
-| 4 | Admin/hidden-endpoint IP allowlist | Django admin and any endpoint meant to stay private must reject requests from IPs outside a configured allowlist. Event ingestion and normal app usage stay open to every IP — only admin/ops surfaces are restricted. | Applied — see "Admin/ops IP allowlist" below. |
+| 4 | Whole-app IP allowlist | The app itself (root, login, dashboard, `/admin`, API — everything not explicitly public) must reject requests from IPs outside a configured allowlist. Only event ingestion (capture, replay, flags, surveys, webhooks, remote-config, objectstorage, livestream) stays open to every IP, since tracked websites' visitors need to reach it from anywhere. | Applied — see "Whole-app IP allowlist" below. |
 
-### Admin/ops IP allowlist (patch #4)
+### Whole-app IP allowlist (patch #4)
 
 Enforced at the Caddy edge (`docker-compose.base.yml`'s `CADDYFILE` template), not in Django,
 because there's no CDN in front of this deployment — Caddy sees the real client TCP source IP
 directly, with no `X-Forwarded-For` spoofing risk, and a rejected request never reaches a
-Django worker. Two `@…-restricted` matchers gate `/admin*` and `/temporal-ui/*` behind
-`not remote_ip 127.0.0.1 ::1 ${ADMIN_ALLOWED_IPS:-}`, `respond 403` for anything that doesn't
-match. Localhost is always allowed (so local dev/in-container debugging never locks out);
-every other caller needs its IP/CIDR listed in `ADMIN_ALLOWED_IPS` in `.env` (space-separated,
-e.g. `ADMIN_ALLOWED_IPS=87.120.106.131`). Updating the allowlist is an `.env` edit + a proxy
+Django worker.
+
+**Scope correction (2026-09-17):** the first version of this patch only restricted `/admin*`
+(Django's low-level admin panel) and `/temporal-ui/*`, leaving the actual PostHog app — login,
+dashboard, everything a normal user or attacker would hit — open to the whole internet. That
+was a misreading of the original ask, caught only after deploying and testing: the operator
+could still reach the login page from any IP. Fixed by restricting the Caddyfile's final
+catch-all `handle {}` (which serves `web:8000`, i.e. the entire app) behind the same
+`not remote_ip 127.0.0.1 ::1 ${ADMIN_ALLOWED_IPS:-}` check, via a new `@app-restricted`
+matcher placed immediately before it. Because Caddy's `handle` blocks are mutually exclusive
+and evaluated in file order, this only ever fires for requests that didn't already match one
+of the explicit public matchers above it (`@capture`, `@replay-capture`, `@capture-ai`,
+`@capture-logs`, `@flags`, `@surveys`, `@remote-config`, `@webhooks`, `@objectstorage`,
+`@livestream`) — so the ingestion/public surface is unaffected. The separate `@temporal-ui`/
+`@temporal-ui-restricted` pair still handles the Temporal UI route on its own; the old
+`@admin-restricted` matcher (redundant now that the catch-all covers `/admin` too) was removed.
+
+Localhost is always allowed (so local dev/in-container debugging never locks out); every other
+caller needs its IP/CIDR listed in `ADMIN_ALLOWED_IPS` in `.env` (space-separated, e.g.
+`ADMIN_ALLOWED_IPS=87.120.106.131`). Updating the allowlist is an `.env` edit + a proxy
 container restart — no rebuild, no code change.
 
 Validated directly against a real `caddy` binary (both syntax — `caddy validate` — and
-behavior): a loopback request to `/admin/` passes through, a non-loopback request (including
-one with a forged `X-Forwarded-For: 87.120.106.131` header) gets `403`, and `/e/` stays
-unaffected either way.
+behavior): a loopback request to `/` and to `/admin/` both pass through (200), and — in the
+first version of this patch — a non-loopback request (including one with a forged
+`X-Forwarded-For: 87.120.106.131` header) got `403` while `/e/` stayed unaffected. The
+corrected version's non-loopback deny path was not re-verified against a real external IP in
+this sandbox (no route to the test container's bridge IP); confirm it live post-deploy by
+hitting `/` from a genuinely different network than the allowlisted one.
 
 **`/temporal-ui/*` also needed `docker-compose.hobby.yml` changes**: `temporal` (port 7233,
 raw gRPC) and `temporal-ui` (port 8081) were previously published to `0.0.0.0` — reachable
