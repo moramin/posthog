@@ -52,7 +52,8 @@ SELF_CAPTURE: bool = get_from_env("SELF_CAPTURE", DEBUG and not DEMO, type_cast=
 E2E_TESTING: bool = get_from_env(
     "E2E_TESTING", False, type_cast=str_to_bool
 )  # whether the app is currently running for E2E tests
-OPT_OUT_CAPTURE: bool = get_from_env("OPT_OUT_CAPTURE", False, type_cast=str_to_bool)
+# Self-hosted fork: never send analytics to PostHog's own ingestion.
+OPT_OUT_CAPTURE: bool = True
 BENCHMARK: bool = get_from_env("BENCHMARK", False, type_cast=str_to_bool)
 if E2E_TESTING:
     logger.warning(

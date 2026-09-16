@@ -12,6 +12,7 @@ from typing import Any
 import requests
 import structlog
 
+from posthog.cloud_utils import is_cloud
 from posthog.exceptions_capture import capture_exception
 from posthog.models.team.team import Team
 from posthog.models.user import User
@@ -34,6 +35,8 @@ def _build_billing_token(team: Team, user: User) -> str | None:
 
 def _team_has_active_billing(team: Team, user: User) -> bool:
     """Check if the team's organization already has an active billing subscription."""
+    if not is_cloud():
+        return False
     try:
         billing_token = _build_billing_token(team, user)
         if not billing_token:
@@ -60,6 +63,8 @@ def _activate_billing_with_spt(team: Team, user: User, spt_token: str) -> bool:
 
     Returns True if activation succeeded, False otherwise.
     """
+    if not is_cloud():
+        return False
     try:
         billing_token = _build_billing_token(team, user)
         if not billing_token:
