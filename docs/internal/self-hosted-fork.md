@@ -34,6 +34,33 @@ described, not necessarily the exact diff.
 | 2 | PostHog AI → OpenRouter only | All LLM calls from PostHog AI (`ee/hogai/...` and the legacy `ee/support_sidebar_max`) must route through OpenRouter, not directly to Anthropic. | **Satisfied by deploy config, no code diff** — see "PostHog AI provider routing" below. |
 | 3 | No outbound calls to PostHog's own services | Nothing in this deployment should call `*.posthog.com`, `*.i.posthog.com`, `posthogstatus.com`, or the license/billing/usage-report endpoints. | Applied — `posthog/settings/base_variables.py` (`OPT_OUT_CAPTURE` hardcoded `True`), `ee/support_sidebar_max/max_search_tool.py` (sitemap fetch skipped), `ee/partners/stripe/api/provisioning/{billing,services_catalog}.py` and every remaining outbound method on `ee/billing/billing_manager.py` (gated behind `is_cloud()`), `useAdblockDetection.ts` (probe skipped). `incidentStatusLogic.tsx`'s status-page poll and `region_proxy.py` were already self-hosted-safe. |
 | 4 | Whole-app IP allowlist | The app itself (root, login, dashboard, `/admin`, API — everything not explicitly public) must reject requests from IPs outside a configured allowlist. Only event ingestion (capture, replay, flags, surveys, webhooks, remote-config, objectstorage, livestream) stays open to every IP, since tracked websites' visitors need to reach it from anywhere. | Applied — see "Whole-app IP allowlist" below. |
+| 5 | Anthropic token-counting fallback | Max/PostHog AI's context-compaction logic calls Anthropic's `count_tokens` beta endpoint directly on the `ChatAnthropic` model, which OpenRouter's Anthropic-compatible endpoint (patch #2) doesn't implement — it 404s and, uncaught, fails the entire chat turn silently ("unable to respond right now"). | Applied — `ee/hogai/core/agent_modes/compaction_manager.py`. |
+
+### Anthropic token-counting fallback (patch #5)
+
+Found by actually testing Max in a real browser (`browser_batch`/Chrome extension) after
+patches for the task-queue and personhog regressions above still left it responding with
+"I'm unable to respond right now." The real error, from `root-temporal-django-worker-1`:
+
+```
+NotFoundError: Error code: 404 - {'error': {'message': 'Not Found', 'code': 404}}
+  ee/hogai/core/agent_modes/compaction_manager.py: AnthropicConversationCompactionManager._get_token_count
+  -> langchain_anthropic ChatAnthropic.get_num_tokens_from_messages
+  -> anthropic.resources.beta.messages.messages.count_tokens
+```
+
+`get_num_tokens_from_messages` calls Anthropic's `/v1/messages/count_tokens` beta endpoint to
+size the conversation window before deciding whether to compact it. OpenRouter's
+Anthropic-Messages-API compatibility (patch #2) covers the main `/v1/messages` chat
+completion endpoint but not this separate beta endpoint — it 404s, and the exception wasn't
+caught anywhere in the call chain, so the whole chat-agent Temporal activity failed on every
+single turn, network-layer-deep in a codepath with no self-hosted-specific handling.
+
+Fixed by wrapping the real API call in `_get_token_count` with `except anthropic.APIStatusError`
+(broad enough to catch any bad HTTP status from this specific call, not just 404) and falling
+back to the same character-count-based estimate (`APPROXIMATE_TOKEN_LENGTH = 4` chars/token)
+this class already uses for short conversations. Token counting becomes approximate instead of
+exact — it only affects *when* compaction triggers, not the correctness of any actual response.
 
 ### Whole-app IP allowlist (patch #4)
 
