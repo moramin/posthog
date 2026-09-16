@@ -108,6 +108,34 @@ Update this table (add rows, change "Status", link the commit) every time a
 must-have patch is added, changed, or removed. Never delete a row silently —
 if a patch is retired, say why.
 
+## Deploy checklist
+
+Everything above is committed to `self-hosted` but is **not live** until the branch is
+built into an image and deployed. Before deploying:
+
+1. Set `ADMIN_ALLOWED_IPS` in `/root/.env` (space-separated IPs/CIDRs, e.g.
+   `ADMIN_ALLOWED_IPS=87.120.106.131`). Without it, only `127.0.0.1`/`::1` can reach
+   `/admin*` and `/temporal-ui/*` — safe-by-default, but you'll lock yourself out too.
+
+After deploying, verify in this order:
+
+1. **Admin allowlist actually sees the real client IP.** This host runs Docker's
+   userland-proxy (`docker-proxy`, confirmed running for ports 80/443/8081/7233 via
+   `docker info` → `EnableUserlandProxy: true`), which is a userspace TCP relay — in
+   principle it could present a NAT'd address to Caddy instead of the true client IP,
+   which would silently break the whole allowlist (either locking everyone out, or —
+   worse — letting everyone through). This was **not directly tested against the new
+   code** before deploy; the only evidence it works is circumstantial (the existing
+   `TRUST_ALL_PROXIES=true` on `web`/`capture` only makes sense if Caddy already sees
+   real client IPs today). Test explicitly:
+   - From your allowlisted IP: `curl -o /dev/null -w '%{http_code}\n' https://<domain>/admin/` → expect `200`/`302` (not `403`).
+   - From a different network (phone on cellular, not wifi/VPN sharing the allowlisted IP): same request → expect `403`.
+   - If the second check is *not* `403`, `remote_ip` is seeing a NAT'd address, not the real client — the allowlist is not enforcing anything, and needs a different approach (e.g. Caddy's `trusted_proxies`/`client_ip` with the docker-proxy's known address explicitly distrusted, or disabling `userland-proxy` in `/etc/docker/daemon.json` and using pure iptables DNAT).
+2. **`/temporal-ui/*` renders correctly.** From an allowlisted IP, open `https://<domain>/temporal-ui/` — check the UI loads and its static assets/API calls resolve under the `/temporal-ui` prefix (see the "Not verified" note above; it may need a Temporal UI base-path env var if it doesn't).
+3. **A billing-gated feature shows unlocked** — e.g. open an organization settings page that used to show an upgrade prompt and confirm it doesn't anymore.
+4. **No outbound-call errors in logs** — `docker compose logs web worker | grep -i "billing.posthog.com\|us.i.posthog.com\|license.posthog.com"` should show nothing new (the existing `extra_hosts` DNS block would surface as connection-refused errors if something still tries).
+5. Optional, not urgent: run `python manage.py sync_available_features` to instantly refresh `available_product_features` for organizations created before this patch, rather than waiting for the hourly Celery Beat task (`sync_all_organization_available_product_features`, confirmed running via `worker-beat`) to do it.
+
 ## Syncing with upstream
 
 Run [`bin/sync-upstream.sh`](../../bin/sync-upstream.sh). It:
