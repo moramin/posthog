@@ -3,7 +3,7 @@ from typing import TYPE_CHECKING
 
 from django.conf import settings
 
-from posthog.cloud_utils import get_cached_instance_license
+from posthog.cloud_utils import get_cached_instance_license, is_cloud
 from posthog.models.user import User
 from posthog.ph_client import feature_enabled_or_false, get_feature_flag_or_none
 
@@ -57,7 +57,9 @@ def get_desktop_access_decision(user: User, organization: "Organization") -> Des
     if not user or not user.is_authenticated or not user.distinct_id:
         raise DesktopAccessResolutionError("Authentication is required to evaluate Desktop access")
 
-    if settings.DEBUG:
+    if settings.DEBUG or not is_cloud():
+        # Self-hosted, single-tenant fork: Desktop access is never gated by funding status,
+        # and this must never call the billing service.
         observe_desktop_access_decision(outcome="override")
         return DesktopAccessDecision.ALLOWED
 

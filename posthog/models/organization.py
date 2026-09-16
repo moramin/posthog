@@ -435,41 +435,20 @@ class Organization(ModelActivityMixin, UUIDTModel):
 
     def update_available_product_features(self) -> list[ProductFeature]:
         """Updates field `available_product_features`. Does not `save()`."""
-        if is_cloud() or self.usage:
-            # Since billing V2 we just use the field which is updated when the billing service is called
-            return self.available_product_features or []
-
-        try:
-            from ee.models.license import License
-        except ImportError:
-            self.available_product_features = []
-            return []
-
-        self.available_product_features = []
-
-        # Self hosted legacy license so we just sync the license features
-        # Demo gets all features
-        if settings.DEMO or "generate_demo_data" in sys.argv[1:2]:
-            features = License.PLANS.get(License.ENTERPRISE_PLAN, [])
-            self.available_product_features = [
-                {"key": feature, "name": " ".join(feature.split(" ")).capitalize()} for feature in features
-            ]
-        else:
-            # Otherwise, try to find a valid license on this instance
-            license = License.objects.first_valid()
-            if license:
-                features = License.PLANS.get(License.ENTERPRISE_PLAN, [])
-                self.available_product_features = [
-                    {"key": feature, "name": " ".join(feature.split(" ")).capitalize()} for feature in features
-                ]
-
+        # Self-hosted, single-tenant fork: every feature is always unlocked.
+        self.available_product_features = [
+            {"key": feature.value, "name": feature.value.replace("_", " ").capitalize()} for feature in AvailableFeature
+        ]
         return self.available_product_features
 
     def get_available_feature(self, feature: Union[AvailableFeature, str]) -> ProductFeature | None:
-        return next(
-            filter(lambda f: f and f.get("key") == feature, self.available_product_features or []),
-            None,
-        )
+        # Self-hosted, single-tenant fork: every feature is always unlocked.
+        feature_key = feature.value if isinstance(feature, AvailableFeature) else feature
+        result: ProductFeature = {"key": feature_key, "name": feature_key.replace("_", " ").capitalize()}  # type: ignore[typeddict-item]
+        if feature_key == AvailableFeature.SESSION_REPLAY_DATA_RETENTION:
+            result["limit"] = 60
+            result["unit"] = "months"
+        return result
 
     def is_feature_available(self, feature: Union[AvailableFeature, str]) -> bool:
         return bool(self.get_available_feature(feature))

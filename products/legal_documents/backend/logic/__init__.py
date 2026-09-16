@@ -19,14 +19,11 @@ from django.utils import timezone
 import structlog
 import posthoganalytics
 
-from posthog.cloud_utils import get_cached_instance_license
 from posthog.email import EmailMessage, get_email_team_and_org_context, is_email_available
 from posthog.event_usage import groups
 from posthog.exceptions_capture import capture_exception
 from posthog.models.organization import Organization, OrganizationMembership
 from posthog.storage import object_storage
-
-from ee.billing.billing_manager import BillingManager
 
 from ..facade.enums import DocumentType
 from ..models import LegalDocument
@@ -34,9 +31,6 @@ from ..storage import signed_pdf_storage_key
 from . import pandadoc as pandadoc_client
 
 logger = structlog.get_logger(__name__)
-
-# Addon types that entitle an organization to a BAA.
-BAA_ADDON_TYPES = frozenset({"boost", "scale", "enterprise"})
 
 # Attribute `annotate_signed_baa` writes onto each Organization row.
 SIGNED_BAA_ANNOTATION = "has_signed_baa"
@@ -77,12 +71,8 @@ def template_id_matches_document(document: LegalDocument, template_id: str) -> b
 
 
 def has_qualifying_baa_addon(organization: Organization) -> bool:
-    billing = BillingManager(get_cached_instance_license()).get_billing(organization)
-    for product in billing.get("products") or []:
-        for addon in product.get("addons") or []:
-            if addon.get("type") in BAA_ADDON_TYPES and addon.get("subscribed"):
-                return True
-    return False
+    # Self-hosted, single-tenant fork: every feature is always unlocked.
+    return True
 
 
 def _signed_baa_subquery() -> QuerySet[LegalDocument]:

@@ -27,7 +27,7 @@ from posthog.api.routing import TeamAndOrgViewSetMixin
 from posthog.api.streaming import streaming_response
 from posthog.api.utils import action
 from posthog.clickhouse.client.limit import ConcurrencyLimitExceeded, ConcurrencySlot, RateLimit
-from posthog.cloud_utils import get_cached_instance_license
+from posthog.cloud_utils import get_cached_instance_license, is_cloud
 from posthog.event_usage import groups
 from posthog.exceptions_capture import capture_exception
 from posthog.models import Organization, OrganizationIntegration, Team, User
@@ -1030,6 +1030,11 @@ class BillingViewset(TeamAndOrgViewSetMixin, viewsets.GenericViewSet):
         permission_classes=[permissions.IsAuthenticated, HasBillingAccess],
     )
     def license(self, request: Request, *args: Any, **kwargs: Any) -> HttpResponse:
+        if not is_cloud():
+            # Self-hosted instances use a local, offline license (see ee/api/license.py) and
+            # never activate a cloud license key against the billing service.
+            raise PermissionDenied("Cloud license activation is not available for self-hosted instances.")
+
         license = get_cached_instance_license()
 
         if license:

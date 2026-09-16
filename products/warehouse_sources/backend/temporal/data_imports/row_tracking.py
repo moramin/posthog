@@ -17,7 +17,7 @@ from redis import (
 )
 from structlog.types import FilteringBoundLogger
 
-from posthog.cloud_utils import get_cached_instance_license
+from posthog.cloud_utils import get_cached_instance_license, is_cloud
 from posthog.exceptions_capture import capture_exception
 from posthog.models import Organization, Team
 from posthog.redis import get_async_client, get_client
@@ -231,7 +231,8 @@ def _rows_synced_in_billing_period(
 
 
 async def will_hit_billing_limit(team_id: int, source: "ExternalDataSource", logger: FilteringBoundLogger) -> bool:
-    if not EE_AVAILABLE:
+    if not EE_AVAILABLE or not is_cloud():
+        # Self-hosted, single-tenant fork: rows synced are never limited by billing.
         return False
 
     try:

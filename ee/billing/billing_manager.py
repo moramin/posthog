@@ -8,7 +8,6 @@ from http.cookiejar import DefaultCookiePolicy
 from typing import Any, Literal, Optional, cast
 from uuid import UUID
 
-from django.conf import settings
 from django.core.cache import cache
 from django.db.models import F
 from django.utils import timezone
@@ -281,64 +280,9 @@ class BillingManager:
         organization: Organization | None,
         query_params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        if not organization or not self.license or not self.license.is_v2_license:
-            return self._get_default_billing_response(organization)
-
-        # Get billing info from billing service
-        billing_service_response = self._get_billing(organization, query_params)
-
-        customer = cast(dict[str, Any], billing_service_response).get("customer")
-        if not customer:
-            return self._get_default_billing_response(organization)
-
-        # Ensure the license and org are updated with the latest info
-        if billing_service_response.get("license"):
-            self.update_license_details(billing_service_response)
-
-        if organization and billing_service_response:
-            self.update_org_details(organization, billing_service_response)
-
-        response: dict[str, Any] = {"available_product_features": []}
-
-        response["license"] = {"plan": self.license.plan}
-
-        response.update(billing_service_response["customer"])
-
-        if not billing_service_response["customer"].get("products"):
-            products = self.get_default_products(organization)
-            response["products"] = products["products"]
-
-        response["stripe_portal_url"] = f"{settings.SITE_URL}/api/billing/portal"
-
-        usage_summary = response.get("usage_summary") or {}
-        if organization.usage:
-            for usage_key, usage in usage_summary.items():
-                # both dicts carry non-usage entries, e.g. "period" is a list
-                org_usage = organization.usage.get(usage_key)
-                if not isinstance(org_usage, dict) or not isinstance(usage, dict):
-                    continue
-                todays_usage = org_usage.get("todays_usage")
-                if todays_usage is not None:
-                    usage["todays_usage"] = todays_usage
-
-        # Extend the products with accurate usage_limit info
-        for product in response["products"]:
-            usage_key = product.get("usage_key")
-            if not usage_key:
-                continue
-            usage = response.get("usage_summary", {}).get(usage_key, {})
-            usage_limit = usage.get("limit")
-            billing_reported_usage = usage.get("usage") or 0
-            current_usage = billing_reported_usage
-
-            if usage.get("todays_usage"):
-                todays_usage = usage["todays_usage"]
-                current_usage = billing_reported_usage + todays_usage
-
-            product["current_usage"] = current_usage
-            product["percentage_usage"] = current_usage / usage_limit if usage_limit else 0
-
-        return response
+        # Self-hosted, single-tenant fork: never call the billing service. Every feature is
+        # always unlocked, so there is nothing for billing to gate and nothing to fetch.
+        return self._get_default_billing_response(organization)
 
     def update_billing(
         self, organization: Organization, data: dict[str, Any], authorizer_actor: Optional[User] = None
@@ -498,10 +442,13 @@ class BillingManager:
 
     def _get_default_billing_response(self, organization: Organization | None) -> dict[str, Any]:
         products = self.get_default_products(organization)
-        response = {
-            "available_product_features": [],
+        available_product_features = organization.update_available_product_features() if organization else []
+        response: dict[str, Any] = {
+            "available_product_features": available_product_features,
             "products": products["products"],
         }
+        if self.license:
+            response["license"] = {"plan": self.license.plan}
 
         return response
 
