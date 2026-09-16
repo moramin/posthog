@@ -144,6 +144,42 @@ services:
                         reverse_proxy objectstorage:19000
                     }
 
+                    # Self-hosted fork: admin and ops surfaces are restricted to an operator-configured
+                    # IP allowlist (ADMIN_ALLOWED_IPS in .env) — everything else (event ingestion, the
+                    # app UI, etc.) stays open. Localhost is always allowed so it never locks out local
+                    # dev or in-container debugging.
+                    @admin-restricted {
+                        not remote_ip 127.0.0.1 ::1 ${ADMIN_ALLOWED_IPS:-}
+                        path /admin
+                        path /admin/*
+                    }
+
+                    handle @admin-restricted {
+                        respond 403
+                    }
+
+                    @temporal-ui {
+                        path /temporal-ui
+                        path /temporal-ui/
+                        path /temporal-ui/*
+                    }
+
+                    @temporal-ui-restricted {
+                        not remote_ip 127.0.0.1 ::1 ${ADMIN_ALLOWED_IPS:-}
+                        path /temporal-ui
+                        path /temporal-ui/
+                        path /temporal-ui/*
+                    }
+
+                    handle @temporal-ui-restricted {
+                        respond 403
+                    }
+
+                    handle @temporal-ui {
+                        uri strip_prefix /temporal-ui
+                        reverse_proxy temporal-ui:8080
+                    }
+
                     handle {
                         reverse_proxy web:8000
                     }

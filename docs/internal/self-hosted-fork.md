@@ -33,7 +33,46 @@ described, not necessarily the exact diff.
 | 1 | Remove `is_cloud` / billing / license gating (backend + frontend) | Self-hosted instance; every `AvailableFeature` should be unlocked and billing/license checks should not gate functionality. See the restriction table gathered during investigation for the full file list (`posthog/models/organization.py`, `posthog/utils.py`, `posthog/api/project.py`, `ee/billing/billing_manager.py`, `ee/api/billing.py`, `ee/api/license.py`, `posthog/tasks/sync_billing.py`, `posthog/tasks/usage_report.py`, `ee/tasks/send_license_usage.py`, `ee/api/subscription.py`, `products/tasks/backend/access.py`, `products/legal_documents/backend/logic/__init__.py`, `products/data_warehouse/.../data_warehouse.py`, `products/warehouse_sources/.../row_tracking.py`, `ee/partners/stripe/api/provisioning/*`, `ee/support_sidebar_max/max_search_tool.py`, `frontend/src/types.ts`, `frontend/src/scenes/userLogic.ts`, `frontend/src/lib/logic/featureFlagLogic.ts`). | Applied — `ee/partners/stripe/api/provisioning/*` (Stripe marketplace provisioning) and `ee/support_sidebar_max/max_search_tool.py` (Max support search) still make outbound calls with no self-hosted gate; both are patch #3 (no outbound calls) follow-ups, not feature gates. |
 | 2 | PostHog AI → OpenRouter only | All LLM calls from PostHog AI (`ee/hogai/...` and the legacy `ee/support_sidebar_max`) must route through OpenRouter, not directly to Anthropic. | **Satisfied by deploy config, no code diff** — see "PostHog AI provider routing" below. |
 | 3 | No outbound calls to PostHog's own services | Nothing in this deployment should call `*.posthog.com`, `*.i.posthog.com`, `posthogstatus.com`, or the license/billing/usage-report endpoints. | Applied — `posthog/settings/base_variables.py` (`OPT_OUT_CAPTURE` hardcoded `True`), `ee/support_sidebar_max/max_search_tool.py` (sitemap fetch skipped), `ee/partners/stripe/api/provisioning/{billing,services_catalog}.py` and every remaining outbound method on `ee/billing/billing_manager.py` (gated behind `is_cloud()`), `useAdblockDetection.ts` (probe skipped). `incidentStatusLogic.tsx`'s status-page poll and `region_proxy.py` were already self-hosted-safe. |
-| 4 | Admin/hidden-endpoint IP allowlist | Django admin and any endpoint meant to stay private must reject requests from IPs outside a configured allowlist. | Not yet applied |
+| 4 | Admin/hidden-endpoint IP allowlist | Django admin and any endpoint meant to stay private must reject requests from IPs outside a configured allowlist. Event ingestion and normal app usage stay open to every IP — only admin/ops surfaces are restricted. | Applied — see "Admin/ops IP allowlist" below. |
+
+### Admin/ops IP allowlist (patch #4)
+
+Enforced at the Caddy edge (`docker-compose.base.yml`'s `CADDYFILE` template), not in Django,
+because there's no CDN in front of this deployment — Caddy sees the real client TCP source IP
+directly, with no `X-Forwarded-For` spoofing risk, and a rejected request never reaches a
+Django worker. Two `@…-restricted` matchers gate `/admin*` and `/temporal-ui/*` behind
+`not remote_ip 127.0.0.1 ::1 ${ADMIN_ALLOWED_IPS:-}`, `respond 403` for anything that doesn't
+match. Localhost is always allowed (so local dev/in-container debugging never locks out);
+every other caller needs its IP/CIDR listed in `ADMIN_ALLOWED_IPS` in `.env` (space-separated,
+e.g. `ADMIN_ALLOWED_IPS=87.120.106.131`). Updating the allowlist is an `.env` edit + a proxy
+container restart — no rebuild, no code change.
+
+Validated directly against a real `caddy` binary (both syntax — `caddy validate` — and
+behavior): a loopback request to `/admin/` passes through, a non-loopback request (including
+one with a forged `X-Forwarded-For: 87.120.106.131` header) gets `403`, and `/e/` stays
+unaffected either way.
+
+**`/temporal-ui/*` also needed `docker-compose.hobby.yml` changes**: `temporal` (port 7233,
+raw gRPC) and `temporal-ui` (port 8081) were previously published to `0.0.0.0` — reachable
+from the entire internet with zero authentication. This was discovered live on the deploy
+host during this work, unrelated to the original ask, and is now fixed: both host port
+publishes are removed (internal services already reach `temporal:7233` over the compose
+network; `temporal-ui` is now only reachable through Caddy's IP-allowlisted `/temporal-ui/*`
+route, proxied with `uri strip_prefix /temporal-ui`). CLI access to Temporal (`tctl` etc.) is
+still available via `docker compose exec temporal-admin-tools`.
+
+**Not verified**: whether Temporal UI's static assets/routing tolerate being mounted under a
+`/temporal-ui` path prefix rather than at root — check this after deploying, since some SPAs
+hardcode root-relative asset paths. If it doesn't render correctly, look for a Temporal UI
+env var to set its public/base path (`TEMPORAL_UI_PUBLIC_PATH` or similar) rather than
+reworking the Caddy route.
+
+**Not covered by this patch**: `/root/docker-compose.override.yml` on the deploy host already
+had `extra_hosts` entries pointing `billing.posthog.com`, `us.i.posthog.com`, and
+`app.posthog.com` at `127.0.0.1` (DNS-level blocking, belt-and-suspenders on top of patch #3's
+`is_cloud()` gates) plus `OPT_OUT_CAPTURE: "true"` — predates this work and isn't tracked in
+this repo since it's a server-local override file, not a git-tracked compose file. Worth
+migrating into a tracked file if this deployment is ever rebuilt from scratch.
 
 ### PostHog AI provider routing (patch #2)
 
