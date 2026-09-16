@@ -122,6 +122,20 @@ anyone reading only the source.** If `.env` is ever regenerated (e.g. by
 is no code guard against this — check `ANTHROPIC_BASE_URL` after any `.env`
 change or reinstall.
 
+**Also config, not code — the Temporal task queue Max runs on.** Max/PostHog AI chats
+execute as Temporal workflows on `max-ai-task-queue`, not the image's default
+`general-purpose-task-queue`. The pre-merge `docker-compose.yml` on the deploy host had
+`temporal-django-worker` running `./bin/temporal-django-worker --task-queue max-ai-task-queue`
+directly; the post-merge `docker-compose.hobby.yml` changed the command to
+`/compose/temporal-django-worker`, a trivial wrapper (`./bin/temporal-django-worker`, no
+flags) that silently falls back to the default queue — so the worker starts fine, looks
+healthy, but never picks up Max's workflow tasks and the AI simply never responds. No error,
+no crash, just silence. Fixed via a `command:` override on `temporal-django-worker` in
+`/root/docker-compose.override.yml` (same untracked-file caveat as above — this needs
+re-adding if the deployment is ever rebuilt from scratch). Confirmed via
+`docker logs root-temporal-django-worker-1 | grep task_queue` showing
+`"task_queue": "max-ai-task-queue"` after the fix.
+
 Update this table (add rows, change "Status", link the commit) every time a
 must-have patch is added, changed, or removed. Never delete a row silently —
 if a patch is retired, say why.
