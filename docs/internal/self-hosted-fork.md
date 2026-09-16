@@ -31,9 +31,39 @@ described, not necessarily the exact diff.
 | # | Area | Why | Status |
 |---|------|-----|--------|
 | 1 | Remove `is_cloud` / billing / license gating (backend + frontend) | Self-hosted instance; every `AvailableFeature` should be unlocked and billing/license checks should not gate functionality. See the restriction table gathered during investigation for the full file list (`posthog/models/organization.py`, `posthog/utils.py`, `posthog/api/project.py`, `ee/billing/billing_manager.py`, `ee/api/billing.py`, `ee/api/license.py`, `posthog/tasks/sync_billing.py`, `posthog/tasks/usage_report.py`, `ee/tasks/send_license_usage.py`, `ee/api/subscription.py`, `products/tasks/backend/access.py`, `products/legal_documents/backend/logic/__init__.py`, `products/data_warehouse/.../data_warehouse.py`, `products/warehouse_sources/.../row_tracking.py`, `ee/partners/stripe/api/provisioning/*`, `ee/support_sidebar_max/max_search_tool.py`, `frontend/src/types.ts`, `frontend/src/scenes/userLogic.ts`, `frontend/src/lib/logic/featureFlagLogic.ts`). | Applied — `ee/partners/stripe/api/provisioning/*` (Stripe marketplace provisioning) and `ee/support_sidebar_max/max_search_tool.py` (Max support search) still make outbound calls with no self-hosted gate; both are patch #3 (no outbound calls) follow-ups, not feature gates. |
-| 2 | PostHog AI → OpenRouter only | All LLM calls from PostHog AI (`ee/hogai/...` and any other caller) must route through OpenRouter, not directly to Anthropic. No direct `ANTHROPIC_API_KEY`/`anthropic` SDK calls in the request path. | Not yet applied |
+| 2 | PostHog AI → OpenRouter only | All LLM calls from PostHog AI (`ee/hogai/...` and the legacy `ee/support_sidebar_max`) must route through OpenRouter, not directly to Anthropic. | **Satisfied by deploy config, no code diff** — see "PostHog AI provider routing" below. |
 | 3 | No outbound calls to PostHog's own services | Nothing in this deployment should call `*.posthog.com`, `*.i.posthog.com`, `posthogstatus.com`, or the license/billing/usage-report endpoints. Analytics capture (`posthoganalytics.capture()`), billing sync, license usage, the adblock probe, and the Max search sitemap fetch are the known callers found so far. | Not yet applied |
 | 4 | Admin/hidden-endpoint IP allowlist | Django admin and any endpoint meant to stay private must reject requests from IPs outside a configured allowlist. | Not yet applied |
+
+### PostHog AI provider routing (patch #2)
+
+Every Anthropic client in this codebase (`ee/hogai/llm.py`'s `MaxChatAnthropic`, via
+`langchain_anthropic.ChatAnthropic`, and the legacy `ee/support_sidebar_max/views.py`'s
+raw `anthropic.Anthropic(...)`) is constructed **without** an explicit `base_url`, so
+both defer to the standard Anthropic SDK env vars. That means routing through
+OpenRouter instead of Anthropic directly needs **no code change** — only the deploy
+environment has to set:
+
+```
+ANTHROPIC_BASE_URL=https://openrouter.ai/api
+ANTHROPIC_API_KEY=<an OpenRouter API key>
+```
+
+OpenRouter exposes an Anthropic-Messages-API-compatible endpoint at
+`/api/v1/messages` (its "Anthropic Skin"), and bare Anthropic model IDs already
+hardcoded in this repo (e.g. `claude-sonnet-4-6`) resolve correctly through it —
+verified live against the deploy host on 2026-09-16, `claude-sonnet-4-6` returned
+a 200 with `"model":"anthropic/claude-sonnet-4.6"` and normal usage/cost fields,
+tool use and extended thinking (`betas`/`thinking` params) pass through as
+Anthropic-format fields since it's the same wire protocol.
+
+**This is config, not code, so it is invisible to `git diff`/rebases and to
+anyone reading only the source.** If `.env` is ever regenerated (e.g. by
+`hobby-installer`, or restoring a `.env.bak-*` that predates this) without
+`ANTHROPIC_BASE_URL` set, PostHog AI silently falls back to calling
+`api.anthropic.com` directly with whatever key is in `ANTHROPIC_API_KEY`. There
+is no code guard against this — check `ANTHROPIC_BASE_URL` after any `.env`
+change or reinstall.
 
 Update this table (add rows, change "Status", link the commit) every time a
 must-have patch is added, changed, or removed. Never delete a row silently —
