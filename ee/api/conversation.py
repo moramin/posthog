@@ -337,12 +337,17 @@ class ConversationViewSet(
                     & tasks_facade.visible_tasks_q(self.request.user.id, relation="task")
                 )
             )
-        # For listing or single retrieval, conversations must be from the assistant and have a title
+        # For listing or single retrieval, conversations must be from the assistant
         if self.action in ("list", "retrieve"):
             queryset = queryset.filter(
-                title__isnull=False,
                 type__in=[Conversation.Type.DEEP_RESEARCH, Conversation.Type.ASSISTANT, Conversation.Type.SLACK],
             )
+            # Self-hosted fork: a brand-new conversation has no title yet (TitleGeneratorNode sets it
+            # asynchronously after the first LLM call), so requiring one here 404s the frontend's
+            # retrieve-by-id right after creation until the title finally lands. The list view still
+            # needs it to hide untitled junk from the sidebar; retrieve already has the exact ID.
+            if self.action == "list":
+                queryset = queryset.filter(title__isnull=False)
             # Hide internal conversations from customers, but show them to support agents during impersonation
             if not is_impersonated_session(self.request):
                 queryset = queryset.filter(is_internal=False)
