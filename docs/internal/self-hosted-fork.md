@@ -209,6 +209,30 @@ After deploying, verify in this order:
 4. **No outbound-call errors in logs** — `docker compose logs web worker | grep -i "billing.posthog.com\|us.i.posthog.com\|license.posthog.com"` should show nothing new (the existing `extra_hosts` DNS block would surface as connection-refused errors if something still tries).
 5. Optional, not urgent: run `python manage.py sync_available_features` to instantly refresh `available_product_features` for organizations created before this patch, rather than waiting for the hourly Celery Beat task (`sync_all_organization_available_product_features`, confirmed running via `worker-beat`) to do it.
 
+## Known operational gap: capture's restart policy (found 2026-09-17)
+
+`capture` (and several other Rust services) run an internal lifecycle monitor that
+self-terminates — **exit code 0, a clean shutdown** — when a dependency stalls (Kafka,
+Redis). Under this host's recurring memory pressure, `capture` and `replay-capture` both
+self-terminated and stayed down for **21+ minutes with zero events ingested**, discovered
+only by manually auditing container status. The reason it went unnoticed: their inherited
+restart policy is `on-failure`, which only restarts on a *nonzero* exit — a clean
+self-shutdown never triggers it.
+
+Fixed via `docker-compose.override.yml` (untracked, server-only — same caveat as the other
+override-based fixes above): `restart: always` on `capture`, `replay-capture`,
+`capture-logs`, `cymbal`, `cymbal-resolution`, and `property-defs-rs` — the Rust services
+most likely to share this lifecycle-monitor pattern. Node-based ingestion services
+(`ingestion-general`, `ingestion-sessionreplay`, etc.) weren't touched; they're a different
+codebase and weren't confirmed to have the same self-shutdown behavior.
+
+**This is a symptom, not the disease.** The underlying cause is the same VM memory pressure
+documented throughout this file (RAM upgrade recommended, see the AI-latency discussion this
+patch set came out of). `restart: always` makes an outage self-heal in seconds instead of
+requiring a human to notice, but it doesn't stop the stall from happening in the first place.
+Worth adding actual monitoring/alerting on container restart counts if this keeps recurring,
+rather than relying on someone periodically running `docker ps -a` by hand.
+
 ## Syncing with upstream
 
 Run [`bin/sync-upstream.sh`](../../bin/sync-upstream.sh). It:
