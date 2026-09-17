@@ -222,16 +222,43 @@ self-shutdown never triggers it.
 Fixed via `docker-compose.override.yml` (untracked, server-only — same caveat as the other
 override-based fixes above): `restart: always` on `capture`, `replay-capture`,
 `capture-logs`, `cymbal`, `cymbal-resolution`, and `property-defs-rs` — the Rust services
-most likely to share this lifecycle-monitor pattern. Node-based ingestion services
-(`ingestion-general`, `ingestion-sessionreplay`, etc.) weren't touched; they're a different
-codebase and weren't confirmed to have the same self-shutdown behavior.
+most likely to share this lifecycle-monitor pattern.
 
-**This is a symptom, not the disease.** The underlying cause is the same VM memory pressure
-documented throughout this file (RAM upgrade recommended, see the AI-latency discussion this
-patch set came out of). `restart: always` makes an outage self-heal in seconds instead of
-requiring a human to notice, but it doesn't stop the stall from happening in the first place.
-Worth adding actual monitoring/alerting on container restart counts if this keeps recurring,
-rather than relying on someone periodically running `docker ps -a` by hand.
+**Update (2026-09-17, after the RAM upgrade below): the same gap hit a Node service too.**
+The VM was resized from 15GB/8vCPU to 32GB/16vCPU (see below), which required a reboot.
+`ingestion-sessionreplay` came back up racing Redis's own startup, hit `EAI_AGAIN` resolving
+`redis7`, self-terminated cleanly (exit 0) same as `capture` did, and sat dead post-reboot for
+the same `on-failure` reason. Extended `restart: always` to `ingestion-general`,
+`ingestion-sessionreplay`, `ingestion-error-tracking`, `ingestion-logs`, and
+`ingestion-traces` too — this class of bug isn't Rust-specific, it's "anything that treats a
+dependency hiccup as fatal instead of retrying," which turns out to be most of the ingestion
+fleet. `capture-logs`'s sibling services in that same family were already covered above.
+
+**This is a symptom, not the disease.** The `capture`/`replay-capture` incident's root cause
+was VM memory pressure; the `ingestion-sessionreplay` incident's root cause was reboot-time
+service ordering (a one-time event, not recurring pressure) — different triggers, identical
+failure mode (clean self-exit + `on-failure` never catches it). `restart: always` makes both
+kinds of outage self-heal in seconds instead of requiring a human to notice, but it doesn't
+stop the underlying stall/race from happening. Worth adding actual monitoring/alerting on
+container restart counts if this keeps recurring, rather than relying on someone periodically
+running `docker ps -a` by hand.
+
+## VM resized: 15GB/8vCPU → 32GB/16vCPU (2026-09-17)
+
+The RAM/CPU pressure documented throughout this file (swap thrashing during builds, the
+AI-latency investigation, and both restart-policy incidents above) was real and load-bearing
+enough that the operator resized the underlying VM. Confirmed post-resize:
+`free -h` → 31Gi total, 15Gi available, **0B swap in use** (down from routinely
+4-6GB of swap in active use on the old 15GB box). `nproc` → 16 (was 8).
+
+This doesn't remove any of the fixes above — the restart-policy hardening and the
+thinking-budget reduction are still correct and worth keeping regardless of how much
+headroom the host has. It does mean the *frequency* of memory-pressure-triggered incidents
+(like the `capture` self-shutdown) should drop sharply. If `capture`/`replay-capture`/etc.
+still self-terminate regularly on the resized box, the cause has shifted from "not enough
+RAM" to something else (a real memory leak, an actual Kafka/Redis problem, or undersized
+per-service resource limits) and is worth investigating fresh rather than assuming it's the
+same capacity issue.
 
 ## Syncing with upstream
 
