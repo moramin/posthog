@@ -49,14 +49,13 @@ from ee.hogai.utils.prompt import format_prompt_string
 from ee.hogai.utils.types import AssistantState, PartialAssistantState
 from ee.hogai.utils.types.base import ArtifactRefMessage
 
-from .parsers import check_memory_collection_completed, compressed_memory_parser
+from .parsers import compressed_memory_parser
 from .prompts import (
     ENQUIRY_INITIAL_MESSAGE,
     ENQUIRY_NO_EVENTS_INITIAL_MESSAGE,
     INITIALIZE_CORE_MEMORY_SYSTEM_PROMPT,
     INITIALIZE_CORE_MEMORY_WITH_BUNDLE_IDS_USER_PROMPT,
     INITIALIZE_CORE_MEMORY_WITH_DOMAINS_USER_PROMPT,
-    MEMORY_COLLECTOR_PROMPT,
     MEMORY_COLLECTOR_WITH_VISUALIZATION_PROMPT,
     MEMORY_INITIALIZED_CONTEXT_PROMPT,
     MEMORY_ONBOARDING_ENQUIRY_PROMPT,
@@ -415,21 +414,12 @@ class MemoryCollectorNode(MemoryOnboardingShouldRunMixin):
         if remember_command_result:
             return PartialAssistantState(memory_collection_messages=[remember_command_result])
 
-        prompt = ChatPromptTemplate.from_messages(
-            [("system", MEMORY_COLLECTOR_PROMPT)], template_format="mustache"
-        ) + await self._aconstruct_messages(state)
-        chain = prompt | self._model | check_memory_collection_completed
-
-        response = await chain.ainvoke(
-            {
-                "core_memory": await self._aget_core_memory_text(force_enabled=True),
-                "date": timezone.now().strftime("%Y-%m-%d"),
-            },
-            config=config,
-        )
-        if response is None:
-            return PartialAssistantState(memory_collection_messages=None)
-        return PartialAssistantState(memory_collection_messages=[*node_messages, cast(LangchainAIMessage, response)])
+        # Self-hosted, single-tenant fork: skip the automatic fact-extraction LLM call that used
+        # to run here unconditionally on every message. It added a full sequential gpt-4.1 round
+        # trip (plus a further round if it decided to call a tool) to every turn's latency, for a
+        # background nice-to-have (Max remembering facts about the product over time) that the
+        # user isn't waiting to see. The explicit /remember command above still works.
+        return None
 
     def router(self, state: AssistantState) -> Literal["tools", "next"]:
         if not state.memory_collection_messages:
