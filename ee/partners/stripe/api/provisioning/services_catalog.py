@@ -19,6 +19,8 @@ from django.core.cache import cache
 import requests
 import structlog
 
+from posthog.cloud_utils import is_cloud
+
 from ee.partners.stripe.api.provisioning.constants import (
     ALL_CATEGORIES,
     ANALYTICS_SERVICE_ID,
@@ -98,6 +100,8 @@ def _build_analytics_service(description: str) -> dict[str, Any]:
 
 def _fetch_services_from_billing() -> list[dict[str, Any]] | None:
     """Fetch product catalog from billing and build the service list."""
+    if not is_cloud():
+        return None
     try:
         res = requests.get(
             f"{BILLING_SERVICE_URL}/api/products-v2",

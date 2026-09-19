@@ -94,14 +94,12 @@ from posthog.models.team.team_caching import set_team_in_cache
 from posthog.models.team.util import actions_that_require_current_team
 from posthog.models.utils import UUIDT
 from posthog.permissions import (
-    CREATE_ACTIONS,
     APIScopePermission,
     OrganizationMemberPermissions,
     TeamMemberLightManagementPermission,
     TeamMemberStrictManagementPermission,
     UserCanCreateProjectPermission,
     get_authenticator_scoped_organization_ids,
-    get_organization_from_view,
 )
 from posthog.scopes import APIScopeObjectOrNotSupported
 from posthog.session_recordings.data_retention import (
@@ -136,8 +134,6 @@ from products.notifications.backend.facade.api import (
 )
 
 logger = structlog.get_logger(__name__)
-
-MAX_ALLOWED_PROJECTS_PER_ORG = 2000
 
 
 # --- Backward-compatibility logic for the /api/projects/ surface ---
@@ -651,6 +647,12 @@ class ProjectBackwardCompatSerializer(
         if "widget_domains" in value and value["widget_domains"] is not None:
             value["widget_domains"] = [domain for domain in value["widget_domains"] if domain]
             validate_authorized_url_wildcards(value["widget_domains"])
+        from products.conversations.backend.api.ai_reply_playbook import validate_playbook_conversations_settings
+
+        # conversations_settings lives on the passthrough Team, not on Project, so a partial
+        # update that omits docs_source still normalizes against the saved source.
+        existing = self.instance.passthrough_team.conversations_settings if self.instance is not None else None
+        validate_playbook_conversations_settings(value, existing=existing if isinstance(existing, dict) else None)
         return value
 
     class Meta:
@@ -1619,9 +1621,10 @@ class ProjectViewSet(
             if warehouse_block_reason:
                 raise exceptions.ValidationError(warehouse_block_reason)
 
-        from posthog.temporal.delete_teams.dispatch import PROJECT_DELETION_DELAY, start_delete_project_data_workflow
+        from posthog.temporal.delete_teams.dispatch import project_deletion_delay, start_delete_project_data_workflow
 
-        deletion_scheduled_at = timezone.now() + PROJECT_DELETION_DELAY
+        deletion_delay = project_deletion_delay(project)
+        deletion_scheduled_at = timezone.now() + (deletion_delay or timedelta())
         claimed_project = Project.objects.filter(pk=project.pk, is_pending_deletion=False).update(
             is_pending_deletion=True,
             deletion_scheduled_at=deletion_scheduled_at,
@@ -1640,7 +1643,9 @@ class ProjectViewSet(
                 project_id=project_id,
                 user_id=user.id,
                 project_name=project_name,
-                start_delay=max(deletion_scheduled_at - timezone.now(), timedelta()),
+                start_delay=(
+                    max(deletion_scheduled_at - timezone.now(), timedelta()) if deletion_delay is not None else None
+                ),
             )
         except Exception:
             Project.objects.filter(pk=project.pk, deletion_scheduled_at=deletion_scheduled_at).update(
@@ -2236,42 +2241,6 @@ class RootProjectViewSet(ProjectViewSet):
 class PremiumMultiProjectPermission(BasePermission):
     """Require user to have all necessary premium features on their plan for create access to the endpoint."""
 
-    message = "You have reached the maximum limit of allowed projects for your current plan. Upgrade your plan to be able to create and manage more projects."
-
     def has_permission(self, request: request.Request, view) -> bool:
-        if view.action not in CREATE_ACTIONS:
-            return True
-
-        try:
-            organization = get_organization_from_view(view)
-        except ValueError:
-            return False
-
-        if request.data.get("is_demo"):
-            # If we're requesting to make a demo project but the org already has a demo project
-            if organization.teams.filter(is_demo=True).exists():
-                return False
-
-        current_non_demo_project_count = organization.teams.exclude(is_demo=True).distinct("project_id").count()
-        projects_feature = organization.get_available_feature(AvailableFeature.ORGANIZATIONS_PROJECTS)
-
-        if projects_feature:
-            allowed_project_count = projects_feature.get("limit")
-            # If allowed_project_count is None then the user is allowed unlimited projects
-            if allowed_project_count is None:
-                # We have a hard limit of MAX_ALLOWED_PROJECTS_PER_ORG projects per organization
-                # We don't want to block updates if a customer is already over the max allowed
-                if current_non_demo_project_count >= MAX_ALLOWED_PROJECTS_PER_ORG and view.action == "create":
-                    self.message = f"You have reached the maximum limit of {MAX_ALLOWED_PROJECTS_PER_ORG} projects per organization. Contact support if you'd like access to more projects."
-                    return False
-                return True
-            # Check current limit against allowed limit
-            if current_non_demo_project_count >= allowed_project_count:
-                return False
-        else:
-            # If the org doesn't have the feature, they can only have one non-demo project
-            if current_non_demo_project_count >= 1:
-                return False
-
-        # in any other case, we're good to go
+        # Self-hosted, single-tenant fork: project creation is never limited by plan or count.
         return True

@@ -974,21 +974,9 @@ export const userLogic = kea<userLogicType>([
     selectors({
         hasAvailableFeature: [
             (s) => [s.user],
-            (user: UserType | null) => {
-                return (feature: AvailableFeature, currentUsage?: number) => {
-                    const availableProductFeatures = user?.organization?.available_product_features
-                    if (availableProductFeatures && availableProductFeatures.length > 0) {
-                        const availableFeature = availableProductFeatures.find((obj) => obj.key === feature)
-                        return availableFeature
-                            ? currentUsage
-                                ? availableFeature?.limit
-                                    ? availableFeature?.limit > currentUsage
-                                    : true
-                                : true
-                            : false
-                    }
-                    return false
-                }
+            // Self-hosted, single-tenant fork: every feature is always unlocked.
+            (_user: UserType | null) => {
+                return (_feature: AvailableFeature, _currentUsage?: number) => true
             },
         ],
         availableFeature: [

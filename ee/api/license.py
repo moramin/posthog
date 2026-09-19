@@ -1,7 +1,8 @@
+from datetime import timedelta
+
 from django.db.models import QuerySet
 from django.utils.timezone import now
 
-import requests
 import posthoganalytics
 from rest_framework import mixins, request, serializers, viewsets
 from rest_framework.permissions import IsAuthenticated
@@ -13,7 +14,7 @@ from posthog.models.organization import Organization
 from posthog.models.team import Team
 from posthog.permissions import IsStaffUser, TimeSensitiveActionPermission
 
-from ee.models.license import License, LicenseError
+from ee.models.license import License
 
 
 class LicenseSerializer(serializers.ModelSerializer):
@@ -30,28 +31,17 @@ class LicenseSerializer(serializers.ModelSerializer):
         extra_kwargs = {"key": {"write_only": True}}
 
     def validate(self, data):
-        validation = requests.post(
-            "https://license.posthog.com/licenses/activate", data={"key": data["key"]}, timeout=10
-        )
-        resp = validation.json()
+        # Self-hosted, single-tenant fork: license activation is local-only and always
+        # grants the enterprise plan, never contacting license.posthog.com.
         user = self.context["request"].user
-        if not validation.ok:
-            posthoganalytics.capture(
-                "license key activation failure",
-                distinct_id=user.distinct_id,
-                properties={"error": validation.content},
-                groups=groups(user.current_organization, user.current_team),
-            )
-            raise LicenseError(resp["code"], resp["detail"])
-
         posthoganalytics.capture(
             "license key activation success",
             distinct_id=user.distinct_id,
             properties={},
             groups=groups(user.current_organization, user.current_team),
         )
-        data["valid_until"] = resp["valid_until"]
-        data["plan"] = resp["plan"]
+        data["valid_until"] = now() + timedelta(days=365 * 100)
+        data["plan"] = License.ENTERPRISE_PLAN
         return data
 
 
@@ -72,11 +62,9 @@ class LicenseViewSet(
         return super().get_queryset()
 
     def destroy(self, request: request.Request, *args, **kwargs) -> Response:
+        # Self-hosted, single-tenant fork: license deactivation is local-only and never
+        # contacts license.posthog.com.
         license = self.get_object()
-        validation = requests.post(
-            "https://license.posthog.com/licenses/deactivate", data={"key": license.key}, timeout=10
-        )
-        validation.raise_for_status()
 
         has_another_valid_license = License.objects.filter(valid_until__gte=now()).exclude(pk=license.pk).exists()
         if not has_another_valid_license:

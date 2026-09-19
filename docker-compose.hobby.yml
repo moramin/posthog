@@ -455,8 +455,9 @@ services:
         logging: *default-logging
         environment:
             - ENABLE_ES=false
-        ports:
-            - 7233:7233
+        # Self-hosted fork: no host port publish. Nothing outside the compose network needs
+        # the raw gRPC frontend — internal services already reach it via `temporal:7233`, and
+        # temporal-admin-tools gives CLI access (`docker compose exec temporal-admin-tools tctl ...`).
         volumes:
             - ./posthog/docker/temporal/dynamicconfig:/etc/temporal/config/dynamicconfig
     elasticsearch:
@@ -476,8 +477,8 @@ services:
             file: docker-compose.base.yml
             service: temporal-ui
         logging: *default-logging
-        ports:
-            - 8081:8080
+        # Self-hosted fork: no host port publish — reached through the proxy's IP-allowlisted
+        # /temporal-ui/* route instead (see docker-compose.base.yml's Caddyfile).
         depends_on:
             temporal:
                 condition: service_started

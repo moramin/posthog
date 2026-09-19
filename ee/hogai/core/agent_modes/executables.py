@@ -101,9 +101,13 @@ class AgentExecutable(BaseAgentLoopRootExecutable):
     """
     Determines the maximum number of tool calls allowed in a single generation.
     """
-    THINKING_CONFIG = {"type": "enabled", "budget_tokens": 10240}
+    THINKING_CONFIG = {"type": "enabled", "budget_tokens": 3072}
     """
     Determines the thinking configuration for the model.
+
+    Self-hosted, single-tenant fork: lowered from upstream's 10240 to cut response latency on
+    routine messages (extended thinking runs on every turn regardless of complexity). Trades
+    some reasoning depth on hard multi-step tasks for materially faster responses overall.
     """
 
     def __init__(

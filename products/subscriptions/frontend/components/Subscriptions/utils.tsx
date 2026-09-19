@@ -333,6 +333,11 @@ export function coerceDeliveryConfigForScope(
     if (!deliveryConfig?.post_all_insights_in_main_message) {
         return deliveryConfig
     }
+    // A prompt report always posts its charts in the main message, so the API rejects this option
+    // and the form hides its toggle. Without this the stored flag has no control that can clear it.
+    if (subscription.resource_type === SubscriptionResourceTypes.AiPrompt) {
+        return { ...deliveryConfig, post_all_insights_in_main_message: false }
+    }
     if (subscription.target_type !== 'slack') {
         return { ...deliveryConfig, post_all_insights_in_main_message: false }
     }
@@ -471,8 +476,9 @@ export interface AiSubscriptionGate {
  * - editing → never block (the backend gates creation only; users must be able to edit/disable).
  */
 export function getAiSubscriptionGate(inputs: AiSubscriptionGateInputs): AiSubscriptionGate {
-    const { isAiPrompt, isParentless, isEditing, aiConsentApproved, isCloud, isDebug, aiFlagEnabled } = inputs
-    const aiAllowed = aiConsentApproved && (isCloud || isDebug) && aiFlagEnabled
+    const { isAiPrompt, isParentless, isEditing, aiConsentApproved, aiFlagEnabled } = inputs
+    // Self-hosted fork: AI subscriptions are not restricted to Cloud (backend gate removed too).
+    const aiAllowed = aiConsentApproved && aiFlagEnabled
     const showResourceTypeToggle = !isParentless && !isEditing && aiFlagEnabled
     return {
         aiAllowed,
