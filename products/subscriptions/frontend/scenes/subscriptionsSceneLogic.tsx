@@ -530,20 +530,17 @@ export const subscriptionsSceneLogic = kea<subscriptionsSceneLogicType>([
         ],
     })),
     selectors({
-        // Mirrors the gate the form applies (getAiSubscriptionGate): a self-hosted instance cannot
-        // run AI reports, so it must not offer them either.
+        // Mirrors the gate the form applies (getAiSubscriptionGate). Self-hosted fork: not restricted to Cloud.
         aiSubscriptionsAvailable: [
-            (s) => [s.featureFlags, s.receivedFeatureFlags, s.currentOrganization, s.preflight],
+            (s) => [s.featureFlags, s.receivedFeatureFlags, s.currentOrganization],
             (
                 featureFlags: FeatureFlagsSet,
                 receivedFeatureFlags: boolean,
-                currentOrganization: OrganizationType | null,
-                preflight: PreflightStatus | null
+                currentOrganization: OrganizationType | null
             ) =>
                 receivedFeatureFlags &&
                 Boolean(featureFlags[FEATURE_FLAGS.SUBSCRIPTION_AI_PROMPT]) &&
-                Boolean(currentOrganization?.is_ai_data_processing_approved) &&
-                Boolean(preflight?.cloud || preflight?.is_debug),
+                Boolean(currentOrganization?.is_ai_data_processing_approved),
         ],
         subscriptions: [
             (s) => [s.subscriptionsResponse],
