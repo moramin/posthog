@@ -298,3 +298,14 @@ A sandboxed/agent checkout of this repo may be a shallow clone
 `git merge-base master upstream/master` unreliable. The sync script assumes a
 full clone (as on the deploy server); unshallow first if running it from a
 shallow checkout (`git fetch --unshallow`).
+
+## Deployment address and network (2026-09-19)
+
+The instance is served at `https://analytics.digiexpress.ir`, floating IP `46.102.132.121`, which maps to the VM's single NIC (`ens3`, private `192.168.1.10`). The previous domain `analytics.npmjs.live` and floating IP `79.175.189.45` were retired.
+
+- **Domain is server config only.** `DOMAIN` and `CADDY_HOST` in `/root/.env`; nothing in this repo references the hostname. Caddy issues the Let's Encrypt certificate itself, which needs ports 80 and 443 reachable from the internet on the floating IP.
+- **Netplan must match the NIC's MAC.** `/etc/netplan/50-cloud-init.yaml` matches by MAC address. After the NIC changed, the stale MAC meant netplan silently did not apply, the VM fell back to the provider's DHCP DNS (`192.168.1.3`), which does not resolve names, and Caddy, OpenRouter calls and outbound mail all failed. Cloud-init network management is disabled (`/etc/cloud/cloud.cfg.d/99-disable-network-config.cfg`) so this file is now authoritative. If the NIC is ever replaced again, update the MAC there and check `resolvectl status`.
+- **The VM's outbound IP is the floating IP.** Anything that allowlists this server (mail relay, partner API) must allow `46.102.132.121`.
+- **Port Security is off on the current NIC and no security group is attached.** Only ports 22, 80 and 443 listen on non-loopback addresses, which is why this is currently safe. Do not publish new container ports on `0.0.0.0` without re-enabling Port Security and a security group in the DigiCloud console.
+- **Email is disabled** (`EMAIL_ENABLED=false` in `.env` and the instance setting). With email enabled PostHog requires email verification at login and sends a new-device notification synchronously; with an unreachable SMTP host each login blocked for about two minutes and then failed. `mail.digikala.com` ports 587, 465 and 25 time out from this VM, so the mail server must allow `46.102.132.121` before email is turned back on (`EMAIL_*` values are still in `.env`).
+- **`web` takes about 10 minutes to start** after a recreate or reboot (migrations run at boot). Expect 502 from Caddy until it is up.
