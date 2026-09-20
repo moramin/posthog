@@ -34,7 +34,6 @@ from posthog.schema import SubscriptionAIContextLimit
 from posthog.api.forbid_destroy_model import ForbidDestroyModel
 from posthog.api.routing import TeamAndOrgViewSetMixin
 from posthog.api.shared import UserBasicSerializer
-from posthog.cloud_utils import is_cloud
 from posthog.constants import SUBSCRIPTION_AI_PROMPT_FEATURE_FLAG_KEY
 from posthog.dataclasses import frozen
 from posthog.event_usage import AnalyticsProps, get_request_analytics_properties, groups
@@ -196,8 +195,6 @@ def _viewable_queryset(
 
 
 def _ai_create_gate_reason(organization, distinct_id: str) -> Optional[str]:
-    if not settings.DEBUG and not is_cloud():
-        return "AI subscriptions are only available in PostHog Cloud."
     if not organization.is_ai_data_processing_approved:
         return "Your organization must approve AI data processing before creating AI subscriptions."
     # Per-user gate so people can self-enable via feature previews (early access) — the flag is

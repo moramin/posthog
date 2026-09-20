@@ -16,8 +16,9 @@ export type FeatureFlagsSet = {
  * the server-configured `PERSISTED_FEATURE_FLAGS` baseline, so anything that enrolls a user into
  * a flag client-side (e.g. early access feature enrollment) has no visible effect there.
  */
-export function areClientFeatureFlagsHonored(preflight: Pick<PreflightStatus, 'cloud' | 'is_debug'> | null): boolean {
-    return !!preflight?.cloud || !!preflight?.is_debug
+export function areClientFeatureFlagsHonored(_preflight: Pick<PreflightStatus, 'cloud' | 'is_debug'> | null): boolean {
+    // Self-hosted, single-tenant fork: client-side feature flags are always honored, same as on Cloud.
+    return true
 }
 
 export const FEATURE_PREVIEW_SELF_HOSTED_DISABLED_REASON =

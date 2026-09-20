@@ -476,8 +476,9 @@ export interface AiSubscriptionGate {
  * - editing → never block (the backend gates creation only; users must be able to edit/disable).
  */
 export function getAiSubscriptionGate(inputs: AiSubscriptionGateInputs): AiSubscriptionGate {
-    const { isAiPrompt, isParentless, isEditing, aiConsentApproved, isCloud, isDebug, aiFlagEnabled } = inputs
-    const aiAllowed = aiConsentApproved && (isCloud || isDebug) && aiFlagEnabled
+    const { isAiPrompt, isParentless, isEditing, aiConsentApproved, aiFlagEnabled } = inputs
+    // Self-hosted fork: AI subscriptions are not restricted to Cloud (backend gate removed too).
+    const aiAllowed = aiConsentApproved && aiFlagEnabled
     const showResourceTypeToggle = !isParentless && !isEditing && aiFlagEnabled
     return {
         aiAllowed,

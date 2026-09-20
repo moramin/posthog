@@ -8,7 +8,6 @@ from http.cookiejar import DefaultCookiePolicy
 from typing import Any, Literal, Optional, cast
 from uuid import UUID
 
-from django.conf import settings
 from django.core.cache import cache
 from django.db.models import F
 from django.utils import timezone
@@ -20,7 +19,7 @@ import structlog
 from requests import JSONDecodeError
 from rest_framework.exceptions import NotAuthenticated
 
-from posthog.cloud_utils import get_cached_instance_license
+from posthog.cloud_utils import get_cached_instance_license, is_cloud
 from posthog.dataclasses import frozen
 from posthog.event_usage import report_user_action
 from posthog.exceptions_capture import capture_exception
@@ -281,68 +280,15 @@ class BillingManager:
         organization: Organization | None,
         query_params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        if not organization or not self.license or not self.license.is_v2_license:
-            return self._get_default_billing_response(organization)
-
-        # Get billing info from billing service
-        billing_service_response = self._get_billing(organization, query_params)
-
-        customer = cast(dict[str, Any], billing_service_response).get("customer")
-        if not customer:
-            return self._get_default_billing_response(organization)
-
-        # Ensure the license and org are updated with the latest info
-        if billing_service_response.get("license"):
-            self.update_license_details(billing_service_response)
-
-        if organization and billing_service_response:
-            self.update_org_details(organization, billing_service_response)
-
-        response: dict[str, Any] = {"available_product_features": []}
-
-        response["license"] = {"plan": self.license.plan}
-
-        response.update(billing_service_response["customer"])
-
-        if not billing_service_response["customer"].get("products"):
-            products = self.get_default_products(organization)
-            response["products"] = products["products"]
-
-        response["stripe_portal_url"] = f"{settings.SITE_URL}/api/billing/portal"
-
-        usage_summary = response.get("usage_summary") or {}
-        if organization.usage:
-            for usage_key, usage in usage_summary.items():
-                # both dicts carry non-usage entries, e.g. "period" is a list
-                org_usage = organization.usage.get(usage_key)
-                if not isinstance(org_usage, dict) or not isinstance(usage, dict):
-                    continue
-                todays_usage = org_usage.get("todays_usage")
-                if todays_usage is not None:
-                    usage["todays_usage"] = todays_usage
-
-        # Extend the products with accurate usage_limit info
-        for product in response["products"]:
-            usage_key = product.get("usage_key")
-            if not usage_key:
-                continue
-            usage = response.get("usage_summary", {}).get(usage_key, {})
-            usage_limit = usage.get("limit")
-            billing_reported_usage = usage.get("usage") or 0
-            current_usage = billing_reported_usage
-
-            if usage.get("todays_usage"):
-                todays_usage = usage["todays_usage"]
-                current_usage = billing_reported_usage + todays_usage
-
-            product["current_usage"] = current_usage
-            product["percentage_usage"] = current_usage / usage_limit if usage_limit else 0
-
-        return response
+        # Self-hosted, single-tenant fork: never call the billing service. Every feature is
+        # always unlocked, so there is nothing for billing to gate and nothing to fetch.
+        return self._get_default_billing_response(organization)
 
     def update_billing(
         self, organization: Organization, data: dict[str, Any], authorizer_actor: Optional[User] = None
     ) -> None:
+        if not is_cloud():
+            return
         res = http_session.patch(
             f"{BILLING_SERVICE_URL}/api/billing/",
             headers=self.get_auth_headers(organization, authorizer_actor=authorizer_actor),
@@ -352,6 +298,8 @@ class BillingManager:
         handle_billing_service_error(res)
 
     def update_available_product_features(self, organization: Organization) -> list[dict[str, Any]]:
+        if not is_cloud():
+            return organization.available_product_features or []
         res = http_session.get(
             f"{BILLING_SERVICE_URL}/api/billing/available_product_features",
             headers=self.get_auth_headers(organization),
@@ -439,6 +387,8 @@ class BillingManager:
             capture_exception(e, {"organization_id": organization.id})
 
     def activate_subscription(self, organization: Organization, data: dict[str, Any]) -> dict[str, Any]:
+        if not is_cloud():
+            return {}
         res = http_session.post(
             f"{BILLING_SERVICE_URL}/api/activate",
             headers=self.get_auth_headers(organization),
@@ -450,6 +400,8 @@ class BillingManager:
         return res.json()
 
     def deactivate_products(self, organization: Organization, products: str) -> None:
+        if not is_cloud():
+            return
         res = http_session.post(
             f"{BILLING_SERVICE_URL}/api/billing/deactivate",
             headers=self.get_auth_headers(organization),
@@ -459,6 +411,8 @@ class BillingManager:
         handle_billing_service_error(res)
 
     def get_funding_status(self, organization: Organization) -> OrganizationFundingStatus:
+        if not is_cloud():
+            raise FundingStatusUnavailable("Funding status is not available for self-hosted instances")
         cache_key = f"organization_funding_status:{organization.id}"
         try:
             cached_status = cache.get(cache_key)
@@ -498,10 +452,13 @@ class BillingManager:
 
     def _get_default_billing_response(self, organization: Organization | None) -> dict[str, Any]:
         products = self.get_default_products(organization)
-        response = {
-            "available_product_features": [],
+        available_product_features = organization.update_available_product_features() if organization else []
+        response: dict[str, Any] = {
+            "available_product_features": available_product_features,
             "products": products["products"],
         }
+        if self.license:
+            response["license"] = {"plan": self.license.plan}
 
         return response
 
@@ -560,6 +517,8 @@ class BillingManager:
         """
         Retrieves stripe protal url
         """
+        if not is_cloud():
+            return ""
         if not self.license:  # mypy
             raise Exception("No license found")
 
@@ -575,6 +534,10 @@ class BillingManager:
         return data["url"]
 
     def _get_products(self, organization: Organization | None):
+        # Self-hosted, single-tenant fork: never call the billing service.
+        if not is_cloud():
+            return []
+
         headers = {}
         params = {"plan": "standard"}
 
@@ -741,6 +704,8 @@ class BillingManager:
         return headers
 
     def get_invoices(self, organization: Organization, status: str | None):
+        if not is_cloud():
+            return {}
         res = http_session.get(
             # TODO(@zach): update this to /api/invoices
             f"{BILLING_SERVICE_URL}/api/billing/get_invoices",
@@ -755,6 +720,8 @@ class BillingManager:
         return data
 
     def credits_overview(self, organization: Organization):
+        if not is_cloud():
+            return {}
         res = http_session.get(
             f"{BILLING_SERVICE_URL}/api/credits/overview",
             headers=self.get_auth_headers(organization),
@@ -765,6 +732,8 @@ class BillingManager:
         return res.json()
 
     def purchase_credits(self, organization: Organization, data: dict[str, Any]):
+        if not is_cloud():
+            return {}
         res = http_session.post(
             f"{BILLING_SERVICE_URL}/api/credits/purchase",
             headers=self.get_auth_headers(organization),
@@ -783,6 +752,8 @@ class BillingManager:
         would swallow 404 (endpoint not deployed) and 401 (auth failure) as success and record an
         error body as a synced credit, hence the explicit (200,).
         """
+        if not is_cloud():
+            return {}
         res = http_session.post(
             f"{BILLING_SERVICE_URL}/api/signals/dispute-pr",
             # The service_action claim is required by billing: it distinguishes this
@@ -798,6 +769,8 @@ class BillingManager:
         return res.json()
 
     def activate_trial(self, organization: Organization, data: dict[str, Any]):
+        if not is_cloud():
+            return {}
         res = http_session.post(
             f"{BILLING_SERVICE_URL}/api/trials/activate",
             headers=self.get_auth_headers(organization),
@@ -811,6 +784,8 @@ class BillingManager:
         return res.json()
 
     def cancel_trial(self, organization: Organization, data: dict[str, Any]):
+        if not is_cloud():
+            return
         res = http_session.post(
             f"{BILLING_SERVICE_URL}/api/trials/cancel",
             headers=self.get_auth_headers(organization),
@@ -833,6 +808,9 @@ class BillingManager:
         Raises:
             ValueError: If billing_provider is specified but the organization doesn't have the integration
         """
+        if not is_cloud():
+            return {}
+
         # Validate that organization has the integration if billing_provider is specified
         if billing_provider:
             from posthog.models import OrganizationIntegration
@@ -858,6 +836,8 @@ class BillingManager:
         return res.json()
 
     def authorize_status(self, organization: Organization, data: dict[str, Any]):
+        if not is_cloud():
+            return {}
         res = http_session.post(
             f"{BILLING_SERVICE_URL}/api/activate/authorize/status",
             headers=self.get_auth_headers(organization),
@@ -882,6 +862,8 @@ class BillingManager:
         Returns:
             Response from billing service with success status
         """
+        if not is_cloud():
+            return {}
         res = http_session.post(
             f"{BILLING_SERVICE_URL}/api/activate/authorize/uninstall",
             headers=self.get_auth_headers(organization),
@@ -902,6 +884,8 @@ class BillingManager:
         return res.json()
 
     def switch_plan(self, organization: Organization, data: dict[str, Any]) -> dict[str, Any]:
+        if not is_cloud():
+            return {}
         res = http_session.post(
             f"{BILLING_SERVICE_URL}/api/subscription/switch-plan/",
             headers=self.get_auth_headers(organization),
@@ -914,6 +898,8 @@ class BillingManager:
         return res.json()
 
     def apply_startup_program(self, organization: Organization, data: dict[str, Any]) -> dict[str, Any]:
+        if not is_cloud():
+            return {}
         res = http_session.post(
             f"{BILLING_SERVICE_URL}/api/startups/apply",
             json=data,
@@ -924,6 +910,8 @@ class BillingManager:
         return res.json()
 
     def claim_coupon(self, organization: Organization, data: dict[str, Any]) -> dict[str, Any]:
+        if not is_cloud():
+            return {}
         res = http_session.post(
             f"{BILLING_SERVICE_URL}/api/coupons/claim",
             json=data,
@@ -934,6 +922,8 @@ class BillingManager:
         return res.json()
 
     def coupons_overview(self, organization: Organization) -> dict[str, Any]:
+        if not is_cloud():
+            return {}
         res = http_session.get(
             f"{BILLING_SERVICE_URL}/api/coupons/overview",
             headers=self.get_auth_headers(organization),
@@ -948,6 +938,8 @@ class BillingManager:
         Evaluation runs as a backend job without an acting user, so the token carries the
         billing alerts service_action claim instead of a user role claim.
         """
+        if not is_cloud():
+            return {}
         res = http_session.get(
             f"{BILLING_SERVICE_URL}/api/billing",
             headers=self.get_auth_headers(organization, service_action=BILLING_ALERTS_EVALUATION_SERVICE_ACTION),
@@ -973,6 +965,8 @@ class BillingManager:
 
     def _get_csv(self, organization: Organization, path: str, params: dict[str, Any]) -> requests.Response:
         """GET a streamed CSV from billing with the export timeout, BILLING_EXPORT_REQUEST_TIMEOUT."""
+        if not is_cloud():
+            raise Exception("Usage and spend exports are not available for self-hosted instances")
         res = http_session.get(
             f"{BILLING_SERVICE_URL}{path}",
             headers=self.get_auth_headers(organization),
@@ -1001,6 +995,9 @@ class BillingManager:
         POST with a JSON body. This handles orgs with many teams whose
         teams_map serialization exceeds URL/header limits.
         """
+        if not is_cloud():
+            return {}
+
         url = f"{BILLING_SERVICE_URL}{path}"
         headers = self.get_auth_headers(organization)
 
@@ -1080,6 +1077,9 @@ class BillingManager:
         Pure passthrough - no transformation of event data.
         Raises exception on failure (causes webhook endpoint to return 500, triggering provider retry).
         """
+        if not is_cloud():
+            return
+
         body = json.dumps(
             {
                 "event_type": event_type,

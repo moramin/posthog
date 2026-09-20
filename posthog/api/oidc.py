@@ -1,3 +1,4 @@
+import re
 import time
 from functools import cached_property
 from typing import Any, cast
@@ -34,6 +35,35 @@ OIDC_REQUEST_DURATION = Histogram(
 
 
 OIDC_FETCH_TIMEOUT_SECONDS = 10
+
+# Candidate claim names per canonical OIDC name, in order of preference. The SAML claim-type URIs
+# appear because an ADFS relying party can emit them unchanged, and `upn` is last for email
+# because ADFS always issues it while the `email` claim depends on the AD `mail` attribute being
+# populated. A `upn` that is not an address still fails the verified-domain check below.
+CLAIM_CANDIDATES: dict[str, tuple[str, ...]] = {
+    "email": (
+        "email",
+        "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress",
+        "upn",
+        "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/upn",
+    ),
+    # `unique_name` is absent on purpose. ADFS issues it as `DOMAIN\\samAccountName`, which is a
+    # login identifier, not a display name. `_display_name_from_account_name` reads it separately
+    # and reformats it, so it can never reach the UI in its raw form.
+    "name": (
+        "name",
+        "Name",
+        "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name",
+    ),
+    "given_name": (
+        "given_name",
+        "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/givenname",
+    ),
+    "family_name": (
+        "family_name",
+        "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/surname",
+    ),
+}
 
 
 @frozen
@@ -226,6 +256,69 @@ class MultitenantOIDCAuth(OpenIdConnectAuth):
         finally:
             OIDC_REQUEST_DURATION.labels(phase).observe(time.monotonic() - started_at)
 
+    @staticmethod
+    def _resolve_claim(canonical: str, userinfo: dict[str, Any], id_token: dict[str, Any]) -> Any:
+        """Read a claim by its canonical OIDC name, across the spellings a provider may use.
+
+        Two independent problems need solving here.
+
+        OIDC Core lets a provider put identity claims in the userinfo response, the ID token, or
+        both. ADFS serves only `sub` from userinfo and carries everything else in the ID token, so
+        a userinfo-only read rejects a valid ADFS login. Both sources carry the same trust,
+        because `validate_and_return_id_token` verifies the token signature before this runs and
+        the caller matches the two `sub` values first.
+
+        An ADFS relying party also chooses its own outgoing claim type per attribute, so the same
+        value arrives as the OIDC short name, as the SAML claim-type URI, or under a hand-typed
+        label, depending on who configured the trust. Each canonical name is therefore tried
+        against a list of candidates, the way the SAML backend reads an assertion in
+        `ee.api.authentication.MultitenantSAMLAuth._get_attr`.
+        """
+        for candidate in CLAIM_CANDIDATES.get(canonical, (canonical,)):
+            for source in (userinfo, id_token):
+                if candidate not in source:
+                    continue
+                value = source[candidate]
+                # A multi-valued AD attribute arrives as a list.
+                if isinstance(value, list):
+                    value = value[0] if value else None
+                if value is not None:
+                    return value
+        return None
+
+    @staticmethod
+    def _display_name_from_account_name(unique_name: Any) -> str | None:
+        """Build a display name out of an ADFS `unique_name`, or return None.
+
+        `posthog.api.signup.social_create_user` refuses a signup whose name is empty, so a relying
+        party that issues no name claim blocks every new member. ADFS always issues `unique_name`
+        as `DOMAIN\\samAccountName`, so dropping the domain prefix and splitting the account name
+        on its separators gives a readable name where there would otherwise be none. The letter
+        case is left alone, because a name like `McDonald` does not survive title casing. A real
+        name claim is resolved first and always wins over this.
+        """
+        if not isinstance(unique_name, str):
+            return None
+        account = unique_name.rsplit("\\", 1)[-1]
+        return " ".join(part for part in re.split(r"[._\-]+", account) if part) or None
+
+    @staticmethod
+    def _is_email_unverified(email_verified: Any) -> bool:
+        """Whether the provider states that the email address is unverified.
+
+        `email_verified` is OPTIONAL in OIDC Core and ADFS never sends it, so an absent claim
+        cannot mean "unverified" without locking out a compliant provider. A provider that sends
+        the claim is still held to it. ADFS claim rules emit strings instead of JSON booleans, so
+        the string forms resolve the same way as the boolean ones.
+        """
+        if email_verified is None:
+            return False
+        if isinstance(email_verified, bool):
+            return not email_verified
+        if isinstance(email_verified, str):
+            return email_verified.strip().lower() != "true"
+        return True
+
     def user_data(self, access_token: str, *args: Any, **kwargs: Any) -> dict[str, Any]:
         id_token = cast(dict[str, Any] | None, self.id_token)
         if id_token is None:
@@ -233,8 +326,10 @@ class MultitenantOIDCAuth(OpenIdConnectAuth):
         userinfo = super().user_data(access_token, *args, **kwargs)
         if not isinstance(userinfo, dict) or userinfo.get("sub") != id_token.get("sub"):
             raise AuthFailed(self, "The OIDC user does not match the ID token.")
-        email = userinfo.get("email")
-        if userinfo.get("email_verified") is not True or not isinstance(email, str):
+        email = self._resolve_claim("email", userinfo, id_token)
+        if not isinstance(email, str) or self._is_email_unverified(
+            self._resolve_claim("email_verified", userinfo, id_token)
+        ):
             raise AuthFailed(self, "OIDC requires a verified email address from the identity provider.")
         if not (
             IdentityProviderConfig.objects.get_queryset()
@@ -243,7 +338,17 @@ class MultitenantOIDCAuth(OpenIdConnectAuth):
             .exists()
         ):
             raise AuthFailed(self, "The OIDC email domain does not belong to this identity provider configuration.")
-        return userinfo
+        # Return the claims under their canonical names so `get_user_details` reads the values
+        # this method resolved, rather than looking up one spelling in one of the two sources.
+        resolved = {
+            canonical: self._resolve_claim(canonical, userinfo, id_token)
+            for canonical in ("name", "given_name", "family_name")
+        }
+        if resolved["name"] is None:
+            resolved["name"] = self._display_name_from_account_name(
+                self._resolve_claim("unique_name", userinfo, id_token)
+            )
+        return {**userinfo, **{k: v for k, v in resolved.items() if v is not None}, "email": email}
 
     def get_user_id(self, details: dict[str, Any], response: dict[str, Any]) -> str:
         issuer = self.identity_provider_config.oidc_issuer_url.rstrip("/")

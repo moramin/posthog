@@ -19,6 +19,17 @@ services:
                 ${CADDY_TLS_BLOCK:-}
                 }
                 ${CADDY_HOST:-http://localhost:8000} {
+                    # Self-hosted fork: compress HTML and JSON only. Streaming (text/event-stream) responses stay uncompressed so they are not buffered.
+                    encode zstd gzip {
+                        minimum_length 1024
+                        match {
+                            header Content-Type application/json*
+                            header Content-Type text/html*
+                        }
+                    }
+                    # Self-hosted fork: build output names carry a content hash, so they never change and can be cached for a year. Unhashed files (array.js, Inter.woff) keep the app's short cache.
+                    @hashed_static path_regexp ^/static/.+-[A-Z0-9]{8}\.(js|css|woff2|woff|map|svg|png|jpg|webp|wasm)
+                    header @hashed_static >Cache-Control "public, max-age=31536000, immutable"
                     @replay-capture {
                         path /s
                         path /s/
@@ -142,6 +153,43 @@ services:
 
                     handle @objectstorage {
                         reverse_proxy objectstorage:19000
+                    }
+
+                    # Self-hosted fork: the app itself (root, login, dashboard, /admin, API, everything
+                    # not already matched above) is restricted to an operator-configured IP allowlist
+                    # (ADMIN_ALLOWED_IPS in .env). Only the ingestion/public matchers above (capture,
+                    # replay, flags, surveys, webhooks, remote-config, objectstorage, livestream) stay
+                    # open to every IP, since tracked websites' visitors need to reach them from
+                    # anywhere. Localhost is always allowed so it never locks out local dev or
+                    # in-container debugging.
+                    @temporal-ui {
+                        path /temporal-ui
+                        path /temporal-ui/
+                        path /temporal-ui/*
+                    }
+
+                    @temporal-ui-restricted {
+                        not remote_ip 127.0.0.1 ::1 ${ADMIN_ALLOWED_IPS:-}
+                        path /temporal-ui
+                        path /temporal-ui/
+                        path /temporal-ui/*
+                    }
+
+                    handle @temporal-ui-restricted {
+                        respond 403
+                    }
+
+                    handle @temporal-ui {
+                        uri strip_prefix /temporal-ui
+                        reverse_proxy temporal-ui:8080
+                    }
+
+                    @app-restricted {
+                        not remote_ip 127.0.0.1 ::1 ${ADMIN_ALLOWED_IPS:-}
+                    }
+
+                    handle @app-restricted {
+                        respond 403
                     }
 
                     handle {

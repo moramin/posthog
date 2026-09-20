@@ -3,6 +3,8 @@ import logging
 import requests
 from bs4 import BeautifulSoup
 
+from posthog.cloud_utils import is_cloud
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -31,6 +33,10 @@ def is_status_query(query):
 
 def get_relevant_urls(query):
     urls = []
+
+    # Self-hosted deployments have no reason to search posthog.com and must not call out to it.
+    if not is_cloud():
+        return urls
 
     try:
         response = requests.get(SITEMAP_URL)

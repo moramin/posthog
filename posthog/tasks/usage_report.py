@@ -29,7 +29,7 @@ from posthog import version_requirement
 from posthog.clickhouse.client import sync_execute
 from posthog.clickhouse.client.connection import ClickHouseUser, Workload
 from posthog.clickhouse.query_tagging import Feature, Product, tags_context
-from posthog.cloud_utils import get_cached_instance_license
+from posthog.cloud_utils import get_cached_instance_license, is_cloud
 from posthog.constants import FlagRequestType
 from posthog.dataclasses import frozen
 from posthog.exceptions_capture import capture_exception
@@ -547,6 +547,10 @@ def get_ph_client(*args: Any, **kwargs: Any) -> PostHogClient:
 @skip_team_scope_audit
 def send_report_to_billing_service(org_id: str, report: dict[str, Any]) -> None:
     if not settings.EE_AVAILABLE:
+        return
+
+    # Self-hosted, single-tenant fork: never send usage reports to the billing service.
+    if not is_cloud():
         return
 
     from ee.billing.billing_manager import BillingManager, build_billing_token

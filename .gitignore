@@ -243,3 +243,6 @@ corpora/
 # Agent workspace scratch directory. Holds live browser profiles and run output
 # for local scripts, so it must never reach a commit.
 /.context/
+
+# Host-specific deployment notes (domain, IPs, SSH, mail host). Never commit.
+/docs/internal/self-hosted-private.md

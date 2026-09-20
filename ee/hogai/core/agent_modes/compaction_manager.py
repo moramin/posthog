@@ -4,6 +4,7 @@ from collections.abc import Callable, Sequence
 from typing import Any, TypeVar, cast
 from uuid import uuid4
 
+import anthropic
 from langchain_anthropic import ChatAnthropic
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import (
@@ -527,6 +528,13 @@ class AnthropicConversationCompactionManager(ConversationCompactionManager):
         thinking_config: dict[str, Any] | None = None,
         **kwargs,
     ) -> int:
-        return await database_sync_to_async(model.get_num_tokens_from_messages, thread_sensitive=False)(
-            messages, thinking=thinking_config, tools=tools
-        )
+        try:
+            return await database_sync_to_async(model.get_num_tokens_from_messages, thread_sensitive=False)(
+                messages, thinking=thinking_config, tools=tools
+            )
+        except anthropic.APIStatusError:
+            # Self-hosted fork: routes through OpenRouter's Anthropic-compatible endpoint, which
+            # doesn't implement the count_tokens beta endpoint this calls (404s). Fall back to the
+            # same character-based estimate used elsewhere in this class rather than fail the turn.
+            tool_tokens = self._get_estimated_tools_tokens(tools) if tools else 0
+            return sum(self._get_estimated_langchain_message_tokens(message) for message in messages) + tool_tokens

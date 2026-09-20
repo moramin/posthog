@@ -51,7 +51,7 @@ from rest_framework import serializers
 from rest_framework.request import Request
 from rest_framework.utils.encoders import JSONEncoder
 
-from posthog.cloud_utils import get_cached_instance_license, is_cloud
+from posthog.cloud_utils import is_cloud
 from posthog.constants import AvailableFeature
 from posthog.exceptions import RequestParsingError, UnspecifiedCompressionFallbackParsingError
 from posthog.exceptions_capture import capture_exception
@@ -1592,32 +1592,15 @@ def get_instance_region() -> Optional[str]:
 def get_can_create_org(user: Union["AbstractBaseUser", "AnonymousUser"]) -> bool:
     """Returns whether a new organization can be created in the current instance.
 
-    Organizations can be created only in the following cases:
-    - if on PostHog Cloud
-    - if running end-to-end tests
-    - if there's no organization yet
-    - if DEBUG is True
-    - if an appropriate license is active and MULTI_ORG_ENABLED is True
+    Self-hosted, single-tenant fork: organization creation is never limited by count or license.
+    It is limited by `ORG_CREATION_ENABLED`, because this instance is reachable from the internet
+    and `SignupViewset` is the one authenticated-user-creating path that no invite or identity
+    provider guards. Setting it to false closes public registration. Staff keep the ability, so an
+    administrator can still add an organization without a redeploy.
     """
-    from posthog.models.organization import Organization
-
-    if (
-        is_cloud()  # There's no limit of organizations on Cloud
-        or (settings.DEMO and user.is_anonymous)  # Demo users can have a single demo org, but not more
-        or settings.E2E_TESTING
-        or settings.DEBUG
-        or not Organization.objects.filter(for_internal_metrics=False).exists()  # Definitely can create an org if zero
-    ):
+    if settings.ORG_CREATION_ENABLED:
         return True
-
-    if settings.MULTI_ORG_ENABLED:
-        license = get_cached_instance_license()
-        if license is not None and AvailableFeature.ZAPIER in license.available_features:
-            return True
-        else:
-            logger.warning("You have configured MULTI_ORG_ENABLED, but not the required premium PostHog plan!")
-
-    return False
+    return bool(getattr(user, "is_staff", False))
 
 
 def get_instance_available_sso_providers() -> dict[str, bool]:

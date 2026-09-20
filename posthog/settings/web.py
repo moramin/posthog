@@ -494,6 +494,13 @@ WHITENOISE_MAX_AGE = get_from_env("WHITENOISE_MAX_AGE", 3600, type_cast=int)
 # non-prod (e.g. dev deploy smoke-tests) can raise it without weakening the prod default.
 SIGNUP_IP_THROTTLE_RATE = get_from_env("SIGNUP_IP_THROTTLE_RATE", "5/day")
 
+# Whether anyone who reaches the login page can create an organization, and with it an account.
+# This fork is a single-tenant instance on the public internet, so it defaults to closed and
+# admits members through the identity provider or an invite. `SignupViewset` is the only path that
+# creates an authenticated user without either of those, which is what this shuts. Staff keep the
+# ability, so the default never locks an administrator out. Read by `get_can_create_org`.
+ORG_CREATION_ENABLED: bool = get_from_env("ORG_CREATION_ENABLED", False, type_cast=str_to_bool)
+
 # Billing usage and spend exports stream a file from the billing service for as long as the
 # browser reads it, so both limits are per user (see ee.api.billing): how often an export may
 # start, and how many may be open at once.

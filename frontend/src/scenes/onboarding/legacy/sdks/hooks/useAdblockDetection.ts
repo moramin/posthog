@@ -30,6 +30,11 @@ export function useAdblockDetection(delayMs: number = 20_000): AdblockDetectionR
                 return 'blocked'
             }
 
+            // Self-hosted deployments don't use PostHog Cloud ingestion, so there's nothing to probe.
+            if (!window.POSTHOG_APP_CONTEXT?.preflight?.cloud) {
+                return 'ok'
+            }
+
             // Check 2 – attempt a fetch to the ingestion endpoint
             try {
                 await fetch('https://us.i.posthog.com/decide/?v=3', {
