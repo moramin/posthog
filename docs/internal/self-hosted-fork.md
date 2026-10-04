@@ -259,6 +259,79 @@ RAM" to something else (a real memory leak, an actual Kafka/Redis problem, or un
 per-service resource limits) and is worth investigating fresh rather than assuming it's the
 same capacity issue.
 
+That expectation did not hold for long: see "Memory stall and the limits that followed" below.
+
+## Memory stall and the limits that followed (2026-10-03)
+
+### What happened
+
+The host ran out of RAM with its 8 GB swap file full.
+The load average read about 800 while the CPU sat idle: about 690 threads were blocked on disk, and iowait was 95%.
+The site did not answer.
+Redpanda stopped answering, `capture` logged `AllBrokersDown`, shut itself down, and Docker restarted it only after the host recovered.
+The kernel killed nothing, because swap existed, so the host crawled instead of crashing.
+
+Nothing bounded memory:
+
+- 14 web workers took about 15 GB.
+- ClickHouse was allowed 90% of host RAM (`max_server_memory_usage_to_ram_ratio` 0.9, about 28 GB).
+- The Celery `worker` ran 5 processes at about 1 GB each.
+- Redpanda, Elasticsearch, Postgres and the Node services took about 8 GB together.
+
+The trigger is unknown.
+The likely cause is a burst of heavy ClickHouse queries, but this is not confirmed.
+
+### Recovery
+
+1. Stop `web` first. It is the largest container and restarts cleanly. It freed about 14 GB at once and swap began to drain.
+2. Set the limits below in the server-only `docker-compose.override.yml`.
+3. Start `web` again. It needs 6 to 10 minutes.
+
+### Limits now in force
+
+| Area | Setting |
+|---|---|
+| `web` container | `mem_limit: 12g` |
+| `worker` container | `mem_limit: 6g` |
+| ClickHouse container | `mem_limit: 9g` (ClickHouse sizes its own cap from the cgroup limit) |
+| ClickHouse per query | `max_memory_usage` 4 GB, in a `users.d` file mounted from the override |
+| Web workers | `GRANIAN_WORKERS=8`, `GRANIAN_WORKERS_MAX_RSS=2048`, `GRANIAN_WORKERS_LIFETIME=43200` |
+| Celery | `WEB_CONCURRENCY=2`, `CELERY_MAX_MEMORY_PER_CHILD=1500000` (KiB) |
+| Protected from the OOM killer | `oom_score_adj: -500` on `kafka`, `db`, `capture`, `replay-capture` |
+| `earlyoom` | Installed. It sends SIGTERM when available RAM is at or below 5% and free swap at or below 15%, and SIGKILL at 2.5% and 7.5%. It avoids sshd, dockerd, containerd and systemd. |
+
+After the change the footprint was about 7.8 GB for `web` and 3.0 GB for `worker`.
+Setting `oom_score_adj` in compose recreates the container, so applying it restarted Redpanda and Postgres once and paused ingestion for about a minute.
+
+### Things learned
+
+- **`memswap_limit` equal to `mem_limit` does not block swap on this host.** The cgroup file `memory.swap.max` stays `max`. The memory caps work (`memory.max` is set), but containers can still swap. Check the real value in `/sys/fs/cgroup/system.slice/docker-<id>.scope/memory.swap.max`.
+- **`docker update --memory` applies live, but it does not persist.** The limits live in the override file, and the next `up -d` recreates the changed containers.
+- **A container's memory figure includes page cache.** ClickHouse showed 6.3 GB, of which 4.5 GB was reclaimable file cache. Use anonymous memory plus swap from `memory.stat` for the real footprint.
+- **Swap fills with cold pages of idle processes even when RAM is free.** This is harmless at zero memory pressure, but an idle worker stalls while its pages are read back.
+- **More swap is not the fix.** Containers hold about 24 GB of 31 GB. A bigger swap lengthens a stall and delays `earlyoom`, which acts only when free swap is low. Compressed swap (zram) or more RAM would help; more disk swap would not.
+- **Web workers creep slowly.** About 1.2 GB per worker after one day, against about 1.5 GB after 12 days on the old setup. The 2 GB RSS limit counts resident pages only, so a worker whose pages sit in swap is never recycled. The 12-hour lifetime covers that.
+- **Do not cut web workers below 8.** Over 24 hours (9,077 requests) the requests in flight were 5 at the median, 12 at the 90th percentile, 20 at the 99th and 46 at the maximum.
+- **Celery was idle.** The queues were empty, so two processes are enough.
+- **ClickHouse queries rarely need more than 4 GB.** Over 7 days: 403,578 queries, 0.35 GB at the 99th percentile, about 127 queries between 4 and 8 GB, and 1,344 that already failed with a memory-limit error.
+- **Several products are unused.** In 30 days: about 7 million events, no `$exception` events and no `$ai_*` events, and the logs and traces topics are empty. The ingestion services for those products, about 0.5 GB together, are candidates to stop.
+
+### Checking for a stall
+
+A load average far above the CPU count with an idle CPU means swap thrashing.
+
+```bash
+uptime; free -m; head -1 /proc/pressure/memory /proc/pressure/io
+```
+
+```bash
+vmstat 1 3
+```
+
+In `vmstat`, a large `b` column (blocked) and a high `wa` (iowait) confirm it.
+List the largest consumers with `ps -eo rss,etimes,comm --sort=-rss | head`, and check `earlyoom` with `journalctl -u earlyoom`.
+Commands can hang during a stall, so run long ones detached and write the output to a file.
+
 ## Syncing with upstream
 
 The fork syncs by merging `upstream/master` into `master`.
@@ -466,8 +539,8 @@ Do not write hostnames, IP addresses, ports or account names into tracked files.
 - **Email is disabled** (`EMAIL_ENABLED=false` in `.env` and the instance setting). With email enabled, PostHog requires email verification at login and sends a new-device notification synchronously. An unreachable SMTP host then blocks each login for about two minutes before it fails. Turn email on only after the mail server allows the VM's public IP.
 - **Never publish a container port on `0.0.0.0` unless it should be public.** The host firewall does not filter ports that Docker publishes. Bind internal ports to `127.0.0.1`.
 - **Old data volumes are kept on purpose.** `root_clickhouse-data`, `root_postgres-data`, `root_redis7-data` and `root_objectstorage` (about 13.5 GB) are named Docker volumes that no container mounts, because the override uses bind mounts under `/var/lib/posthog`. The ClickHouse one is larger than the live data and was written until Sep 16, so it may hold events the live copy lacks. Compare before deleting. If the override's bind mounts are ever removed, compose would silently switch to these stale volumes.
-- **Web concurrency is set by `GRANIAN_WORKERS`, not `WEB_CONCURRENCY`.** Under ASGI a sync Django view holds its whole worker until it finishes (`bin/docker-server`), so the worker count is the maximum number of concurrent requests. The upstream default of 4 made every page (30+ parallel API calls) queue while 16 CPUs sat idle. The server override sets `GRANIAN_WORKERS=14` (about 1.2 GB each) and `GRANIAN_WORKERS_MAX_RSS=2048` so Granian respawns any worker that creeps past 2 GB. `WEB_CONCURRENCY` only controls Celery (`bin/docker-worker-celery`); it is set to 4 on the `worker` service (upstream default is one process per CPU) to pay for the extra web memory. `vm.swappiness=10` (`/etc/sysctl.d/99-tuning.conf`) keeps idle-but-needed pages such as Redpanda's out of swap.
-- **Measured capacity (same 5-endpoint mix, generator in another container).** 10 workers plateaued at about 27 requests per second; 14 workers reach about 33. At 48 concurrent requests the p90 fell from 4.3 s to 3.0 s; below about 12 concurrent requests nothing changed. Postgres is now the next limit (about 3 CPU cores at saturation, roughly 95 ms of Postgres CPU per request).
+- **Web concurrency is set by `GRANIAN_WORKERS`, not `WEB_CONCURRENCY`.** Under ASGI a sync Django view holds its whole worker until it finishes (`bin/docker-server`), so the worker count is the maximum number of concurrent requests. The upstream default of 4 made every page (30+ parallel API calls) queue while 16 CPUs sat idle. The server override sets `GRANIAN_WORKERS=8` (about 1.2 GB each), `GRANIAN_WORKERS_MAX_RSS=2048` so Granian respawns any worker that creeps past 2 GB, and `GRANIAN_WORKERS_LIFETIME=43200` so each worker restarts every 12 hours. The count was 14 until the 2026-10-03 memory stall, when 14 workers no longer fit in RAM. `WEB_CONCURRENCY` only controls Celery (`bin/docker-worker-celery`); it is set to 2 on the `worker` service (upstream default is one process per CPU), together with `CELERY_MAX_MEMORY_PER_CHILD`. `vm.swappiness=10` (`/etc/sysctl.d/99-tuning.conf`) keeps idle-but-needed pages such as Redpanda's out of swap.
+- **Measured capacity (same 5-endpoint mix, generator in another container).** 10 workers plateaued at about 27 requests per second; 14 workers reach about 33. At 48 concurrent requests the p90 fell from 4.3 s to 3.0 s; below about 12 concurrent requests nothing changed. Postgres is now the next limit (about 3 CPU cores at saturation, roughly 95 ms of Postgres CPU per request). These numbers are from the 14-worker setup. The server now runs 8 workers, so peak throughput is lower; see "Memory stall and the limits that followed".
 - **Every request opens a new Postgres connection.** `CONN_MAX_AGE` is hard-coded to 0 in `posthog/settings/data_stores.py` (two places) and costs about 18 ms per request against 0.12 ms for a query on an open connection. Making it an env setting is the obvious next step, but the async AI code paths run ORM calls in pool threads that would each keep a connection. If tried, also set Postgres `idle_session_timeout` and `max_connections`, and turn on `CONN_HEALTH_CHECKS`.
 - **Caddy compresses HTML and JSON only** (`encode zstd gzip` in `docker-compose.base.yml`, minimum 1 KB). Streaming `text/event-stream` responses, such as PostHog AI chat, are not compressed on purpose, so they are not buffered.
 - **Hashed static files are cached for a year.** Caddy sets `Cache-Control: public, max-age=31536000, immutable` on `/static/*-<8 hash chars>.<ext>` (JS, CSS, source maps, fonts). Unhashed files such as `array.js` and `Inter.woff` keep the app's 1-hour cache.
