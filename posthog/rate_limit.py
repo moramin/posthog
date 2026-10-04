@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from rest_framework.views import APIView
 
 from posthog.auth import OAuthAccessTokenAuthentication, PersonalAPIKeyAuthentication, ProjectSecretAPIKeyAuthentication
+from posthog.cloud_utils import is_cloud
 from posthog.event_usage import report_user_action
 from posthog.exceptions_capture import capture_exception
 from posthog.metrics import LABEL_PATH, LABEL_ROUTE, LABEL_TEAM_ID
@@ -791,6 +792,9 @@ class _AIThrottleBase(UserRateThrottle):
     action_name: str
 
     def allow_request(self, request, view):
+        # Self-hosted, single-tenant fork: AI usage is never rate limited.
+        if not is_cloud():
+            return True
         request_allowed = super().allow_request(request, view)
         if not request_allowed and request.user.is_authenticated:
             report_user_action(request.user, self.action_name, request=request)

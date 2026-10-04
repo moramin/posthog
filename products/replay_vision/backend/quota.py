@@ -10,6 +10,7 @@ from django.db.models.functions import Coalesce, TruncDay
 import structlog
 from dateutil.relativedelta import relativedelta
 
+from posthog.cloud_utils import is_cloud
 from posthog.dataclasses import frozen
 from posthog.date_util import start_of_month
 from posthog.models.organization import Organization
@@ -498,7 +499,8 @@ def quota_state(organization_id: UUID) -> QuotaState:
     reserved = sum(observation_credits_for_model(model or "") * count for model, count in in_flight_models.items())
     synced, credit_limit = _billing_synced_limit(organization)
     if not synced:
-        credit_limit = MONTHLY_CREDIT_QUOTA
+        # Self-hosted fork: an organization billing never synced is uncapped, not held to the free-tier fallback.
+        credit_limit = MONTHLY_CREDIT_QUOTA if is_cloud() else None
     # The tighter of billing's limit and the override, so a config mistake can only reduce credits;
     # this is how an internal org on an unlimited plan still gets a spend ceiling.
     override = ORG_CREDIT_LIMIT_OVERRIDES.get(str(organization_id))

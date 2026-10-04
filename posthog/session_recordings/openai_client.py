@@ -13,16 +13,12 @@ from posthoganalytics.ai.openai import OpenAI
 from posthoganalytics.client import Client
 from rest_framework import exceptions
 
-from posthog.cloud_utils import is_cloud
 
 BASE_LLM_CALL_TIMEOUT_S = 600.0
 
 
 def _get_default_posthog_client() -> Client:
     """Return the default analytics client after validating the environment."""
-    if not settings.DEBUG and not is_cloud():
-        raise exceptions.ValidationError("AI features are only available in PostHog Cloud")
-
     if not os.environ.get("OPENAI_API_KEY"):
         raise exceptions.ValidationError("OpenAI API key is not configured")
 

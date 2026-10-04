@@ -166,7 +166,7 @@ services:
             OTEL_SERVICE_NAME: 'posthog'
             OTEL_EXPORTER_OTLP_ENDPOINT: ''
             OTEL_SDK_DISABLED: 'true'
-            OPT_OUT_CAPTURE: ${OPT_OUT_CAPTURE:-false}
+            OPT_OUT_CAPTURE: ${OPT_OUT_CAPTURE:-true}
             # Blank sends no CSP reports. Point it at this instance's own /report/ endpoint to
             # collect them yourself.
             CSP_REPORT_ENDPOINT: ${CSP_REPORT_ENDPOINT:-}

@@ -11,7 +11,6 @@ import time
 from collections.abc import AsyncIterator, Iterator, Mapping
 from typing import Any, Literal
 
-from django.conf import settings
 
 import httpx
 import structlog
@@ -25,9 +24,7 @@ from langchain_openai import ChatOpenAI
 from openai import APIError, RateLimitError
 from posthoganalytics.ai.langchain.callbacks import CallbackHandler
 from pydantic import PrivateAttr
-from temporalio.exceptions import ApplicationError
 
-from posthog.cloud_utils import is_cloud
 from posthog.llm.gateway_client import ai_gateway_headers, resolve_ai_gateway_config
 from posthog.llm.openai_flex import FLEX_CAPABLE_MODELS, is_flex_recoverable
 
@@ -154,13 +151,6 @@ def build_langchain_chat_client(
     the generation to the customer user or team. The other observability arguments correlate every
     model call in one agent invocation.
     """
-    if not settings.DEBUG and not is_cloud():
-        raise ApplicationError(
-            "AI features are only available in PostHog Cloud",
-            type=AI_FEATURES_CLOUD_ONLY_ERROR_TYPE,
-            non_retryable=True,
-        )
-
     gateway = resolve_ai_gateway_config()
     if gateway:
         return FlexFirstChatOpenAI(
