@@ -2,8 +2,6 @@ from collections.abc import Sequence
 from typing import Literal, Optional, Union, cast
 from uuid import uuid4
 
-from django.utils import timezone
-
 from langchain_core.messages import (
     AIMessage as LangchainAIMessage,
     BaseMessage,
