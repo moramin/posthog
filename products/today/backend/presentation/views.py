@@ -15,6 +15,7 @@ from rest_framework.throttling import UserRateThrottle
 
 from posthog.api.mixins import validated_request
 from posthog.api.routing import TeamAndOrgViewSetMixin
+from posthog.cloud_utils import is_cloud
 from posthog.llm.system_one import SystemOneNotConfigured, SystemOneRequestFailed
 from posthog.models import User
 from posthog.rate_limit import BurstRateThrottle, SustainedRateThrottle
@@ -45,12 +46,20 @@ class JevUnavailable(APIException):
     default_code = "jev_unavailable"
 
 
-class JevBurstThrottle(UserRateThrottle):
+class _JevThrottleBase(UserRateThrottle):
+    def allow_request(self, request, view):
+        # Self-hosted, single-tenant fork: AI usage is never rate limited.
+        if not is_cloud():
+            return True
+        return super().allow_request(request, view)
+
+
+class JevBurstThrottle(_JevThrottleBase):
     scope = "today_jev_burst"
     rate = "60/minute"
 
 
-class JevSustainedThrottle(UserRateThrottle):
+class JevSustainedThrottle(_JevThrottleBase):
     scope = "today_jev_sustained"
     rate = "1500/day"
 
