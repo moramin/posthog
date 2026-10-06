@@ -102,13 +102,14 @@ class AgentExecutable(BaseAgentLoopRootExecutable):
     """
     Determines the maximum number of tool calls allowed in a single generation.
     """
-    THINKING_CONFIG = {"type": "enabled", "budget_tokens": 3072}
+    THINKING_CONFIG: dict[str, Any] | None = {"type": "disabled"}
     """
     Determines the thinking configuration for the model.
 
-    Self-hosted, single-tenant fork: lowered from upstream's 10240 to cut response latency on
-    routine messages (extended thinking runs on every turn regardless of complexity). Trades
-    some reasoning depth on hard multi-step tasks for materially faster responses overall.
+    Self-hosted, single-tenant fork: extended thinking adds seconds to every agent round, and the
+    agent runs many rounds per answer. Without it the agent trades some reasoning depth on hard
+    multi-step tasks for much faster responses. The setting is sent explicitly because DeepSeek
+    reasons by default when the request leaves it out.
     """
 
     def __init__(
@@ -279,15 +280,12 @@ class AgentExecutable(BaseAgentLoopRootExecutable):
 
     def _get_model(self, state: AssistantState, tools: list["MaxTool"]):
         model_kwargs: dict[str, Any] = {
-            "model": "claude-sonnet-4-6",
+            "model": "deepseek/deepseek-v4-pro-0813",
             "streaming": True,
             "stream_usage": True,
             "user": self._user,
             "team": self._team,
-            "betas": [
-                "interleaved-thinking-2025-05-14",
-                "fine-grained-tool-streaming-2025-05-14",
-            ],
+            "betas": ["fine-grained-tool-streaming-2025-05-14"],
             "max_tokens": 16384,
             "thinking": self.THINKING_CONFIG,
             # langchain-anthropic 0.3.x doesn't have a first-class effort field;

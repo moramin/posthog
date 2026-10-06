@@ -1,3 +1,4 @@
+import { useValues } from 'kea'
 import posthog from 'posthog-js'
 import { useState } from 'react'
 
@@ -6,10 +7,17 @@ import { Link } from '@posthog/lemon-ui'
 import { LemonBanner } from 'lib/lemon-ui/LemonBanner'
 import { LemonButton } from 'lib/lemon-ui/LemonButton'
 import { LemonModal } from 'lib/lemon-ui/LemonModal'
+import { preflightLogic } from 'lib/logic/preflightLogic'
 import { urls } from 'scenes/urls'
 
 export function FreeHistoricalSyncsBanner({ hideGetStarted }: { hideGetStarted?: boolean }): JSX.Element {
     const [showModal, setShowModal] = useState(false)
+    const { preflight } = useValues(preflightLogic)
+
+    // The free first week and its row cap are PostHog Cloud billing terms. A self-hosted instance has no row limit.
+    if (!preflight?.cloud) {
+        return <></>
+    }
 
     return (
         <>

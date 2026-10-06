@@ -14,10 +14,14 @@ from posthog.llm.system_one import (
     NoulAnswer,
     NoulQuestion,
     Question,
+    ScoreAnswer,
+    ScoreQuestion,
     SystemOneNotConfigured,
     SystemOneRequestFailed,
 )
 from posthog.llm.system_one_client import (
+    OPENROUTER_JEV_MODEL,
+    ChatCompletionsSystemOneClient,
     GatewaySystemOneClient,
     SystemOneClient,
     TypeSafeFallback,
@@ -29,7 +33,14 @@ from posthog.llm.system_one_client import (
 GATEWAY_MODEL = "posthog/hogference/jevk5-fp8-0.2"
 FALLBACK = TypeSafeFallback(model="jev-1.13.0", source="test", priority=Priority.BATCH)
 GATEWAY = {"AI_GATEWAY_URL": "https://ai-gateway.example.com/v1", "AI_GATEWAY_API_KEY": "phs_test"}
-NOTHING = {"AI_GATEWAY_URL": "", "AI_GATEWAY_API_KEY": "", "TYPESAFE_API_KEY": ""}
+NOTHING = {
+    "AI_GATEWAY_URL": "",
+    "AI_GATEWAY_API_KEY": "",
+    "TYPESAFE_API_KEY": "",
+    "OPENAI_BASE_URL": "https://api.openai.com/v1",
+    "OPENAI_API_KEY": "",
+}
+OPENROUTER = {"OPENAI_BASE_URL": "https://openrouter.ai/api/v1", "OPENAI_API_KEY": "sk-or-test"}
 QUESTIONS: dict[str, Question] = {
     "urgent": NoulQuestion(instructions="Is this urgent?"),
     "team": ChoiceQuestion(instructions="Which team handles this?", criteria={"billing": None, "support": None}),
@@ -62,6 +73,14 @@ class TestBuildSystemOneClient(SimpleTestCase):
         [
             ("gateway_wins", {**GATEWAY, "TYPESAFE_API_KEY": "ts-key"}, GatewaySystemOneClient, GATEWAY_MODEL),
             ("typesafe_fallback", {"TYPESAFE_API_KEY": "ts-key"}, TypeSafeSystemOneClient, FALLBACK.model),
+            ("gateway_beats_openrouter", {**GATEWAY, **OPENROUTER}, GatewaySystemOneClient, GATEWAY_MODEL),
+            ("openrouter_chat", OPENROUTER, ChatCompletionsSystemOneClient, OPENROUTER_JEV_MODEL),
+            (
+                "openrouter_beats_typesafe",
+                {**OPENROUTER, "TYPESAFE_API_KEY": "ts-key"},
+                ChatCompletionsSystemOneClient,
+                OPENROUTER_JEV_MODEL,
+            ),
             (
                 "gateway_over_plain_http_falls_back",
                 {
@@ -88,6 +107,9 @@ class TestBuildSystemOneClient(SimpleTestCase):
             ("nothing_configured", NOTHING, FALLBACK),
             # A caller that passes no fallback must never reach TypeSafe, even with its key set.
             ("typesafe_not_allowed", {**NOTHING, "TYPESAFE_API_KEY": "ts-key"}, None),
+            # Only OpenRouter lists the Jev model, so a key for another OpenAI-style host must not select it.
+            ("openai_host_is_not_openrouter", {**NOTHING, "OPENAI_API_KEY": "sk-test"}, FALLBACK),
+            ("openrouter_without_a_key", {**NOTHING, "OPENAI_BASE_URL": OPENROUTER["OPENAI_BASE_URL"]}, FALLBACK),
             (
                 "gateway_key_over_plain_http",
                 {**NOTHING, "AI_GATEWAY_URL": "http://ai-gateway.example.com/v1", "AI_GATEWAY_API_KEY": "phs_test"},
@@ -213,3 +235,86 @@ class TestBuildSystemOneClient(SimpleTestCase):
 
         kwargs = system_one.call_args.kwargs
         assert (kwargs["source"], kwargs["model"], kwargs["priority"]) == ("test", FALLBACK.model, Priority.BATCH)
+
+    def test_openrouter_chat_answers_become_system_one_answers(self) -> None:
+        questions: dict[str, Question] = {
+            **QUESTIONS,
+            "tone": ScoreQuestion(instructions="How angry is it?", criteria=["calm", "annoyed", "furious"]),
+        }
+        reply = {
+            "urgent": {"probability": 0.9},
+            # The model does not always return probabilities that sum to 1, so the client normalizes them.
+            "team": {"probabilities": {"billing": 3, "support": 1}},
+            "tone": {"probabilities": {"0": 0.2, "1": 0.2, "2": 0.6}},
+        }
+        completion = {
+            "model": "provider/answering-model",
+            "choices": [{"message": {"content": json.dumps(reply)}}],
+            "usage": {"prompt_tokens": 40, "completion_tokens": 25},
+        }
+        with override_settings(**{**NOTHING, **OPENROUTER}):
+            client = _build(None)
+        with patch.object(httpx.Client, "send", return_value=httpx.Response(200, json=completion)) as send:
+            result = client.decide(state={"ticket": "Payouts fail"}, questions=questions)
+
+        request: httpx.Request = send.call_args.args[0]
+        body = json.loads(request.content)
+        assert str(request.url) == "https://openrouter.ai/api/v1/chat/completions"
+        assert request.headers["Authorization"] == "Bearer sk-or-test"
+        assert body["model"] == OPENROUTER_JEV_MODEL
+        assert body["response_format"]["json_schema"]["schema"]["required"] == ["urgent", "team", "tone"]
+        assert result.model == "provider/answering-model"
+        assert (result.input_tokens, result.output_tokens) == (40, 25)
+        assert result.answers == {
+            "urgent": NoulAnswer(probability=0.9),
+            "team": ChoiceAnswer(choice="billing", confidence=0.75, probabilities={"billing": 0.75, "support": 0.25}),
+            "tone": ScoreAnswer(score=1.4, confidence=0.6, probabilities={"0": 0.2, "1": 0.2, "2": 0.6}),
+        }
+
+    @parameterized.expand(
+        [
+            ("http_error", httpx.Response(403, json={"error": "Access denied"}), 403),
+            ("empty_reply", httpx.Response(200, json={"choices": [{"message": {"content": ""}}]}), None),
+            (
+                "answer_for_one_question_only",
+                httpx.Response(
+                    200, json={"choices": [{"message": {"content": json.dumps({"urgent": {"probability": 0.5}})}}]}
+                ),
+                None,
+            ),
+            (
+                "probability_out_of_range",
+                httpx.Response(
+                    200,
+                    json={
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": json.dumps(
+                                        {
+                                            "urgent": {"probability": 7},
+                                            "team": {"probabilities": {"billing": 1, "support": 0}},
+                                        }
+                                    )
+                                }
+                            }
+                        ]
+                    },
+                ),
+                None,
+            ),
+        ]
+    )
+    def test_openrouter_failures_raise_request_failed(
+        self, _name: str, response: httpx.Response, status_code: int | None
+    ) -> None:
+        with override_settings(**{**NOTHING, **OPENROUTER}):
+            client = _build(None)
+
+        with (
+            patch.object(httpx.Client, "send", return_value=response),
+            self.assertRaises(SystemOneRequestFailed) as raised,
+        ):
+            client.decide(state="x", questions=QUESTIONS)
+
+        assert raised.exception.status_code == status_code

@@ -31,7 +31,12 @@ from posthog.llm.system_one import (
     SystemOneNotConfigured,
     SystemOneRequestFailed,
 )
-from posthog.llm.system_one_client import GatewaySystemOneClient, build_system_one_client
+from posthog.llm.system_one_client import (
+    AsyncSystemOneClient,
+    ChatCompletionsSystemOneClient,
+    GatewaySystemOneClient,
+    build_system_one_client,
+)
 from posthog.ph_client import feature_enabled_or_false
 
 if TYPE_CHECKING:
@@ -141,7 +146,7 @@ class PromptJevRunner:
         self.cache: dict[_DecisionKey, object] = {}
         self.input_bytes = 0
         self.deadline = time.monotonic() + 60
-        self.clients: dict[str, GatewaySystemOneClient] = {}
+        self.clients: dict[str, AsyncSystemOneClient] = {}
 
     def source_timeout(self) -> int:
         # Source scans share the inference deadline. ClickHouse takes max_execution_time in whole seconds, and 0 disables it.
@@ -237,7 +242,7 @@ class PromptJevRunner:
                     distinct_id=self.distinct_id,
                     properties={"team_id": str(self.team_id)},
                 )
-                assert isinstance(client, GatewaySystemOneClient)
+                assert isinstance(client, GatewaySystemOneClient | ChatCompletionsSystemOneClient)
                 self.clients[spec.model] = client
             except SystemOneNotConfigured as error:
                 raise QueryError(

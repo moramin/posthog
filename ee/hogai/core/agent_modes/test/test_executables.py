@@ -1257,8 +1257,10 @@ class TestAgentNodeModelRouting(BaseTest):
         self.assertEqual(root_model.anthropic_api_url, "https://ai-gateway.test")
         self.assertIsNone(root_model.default_headers)
         assert isinstance(root_model.ai_gateway_fallback, MaxChatAnthropic)
-        self.assertEqual(root_model.ai_gateway_fallback.model, "claude-sonnet-4-6")
+        self.assertEqual(root_model.ai_gateway_fallback.model, "deepseek/deepseek-v4-pro-0813")
         self.assertTrue(root_model.billable)
+        # DeepSeek reasons on every round when the request omits the thinking setting.
+        self.assertEqual(root_model.ai_gateway_fallback.thinking, {"type": "disabled"})
         mock_variant.assert_not_called()
 
     @override_settings(
