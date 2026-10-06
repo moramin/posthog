@@ -15,10 +15,10 @@ from typing import Literal, get_args
 # `GRANTABLE_API_SCOPE_OBJECTS` below, through the `resource` choice fields of the access
 # control serializers.
 #
-# The MCP `OAUTH_SCOPES_SUPPORTED` list at
-# `services/mcp/src/lib/oauth-scopes.generated.ts` is generated from
-# `get_scope_descriptions()` below via `posthog/scopes_projection.py`. Run
-# `hogli build:projections` to regenerate after editing this file.
+# The `OAUTH_SCOPES_SUPPORTED` and `OAUTH_SCOPES_HIDDEN` lists at
+# `services/mcp/src/lib/oauth-scopes.generated.ts` and `frontend/src/lib/oauthScopes.generated.ts`
+# are generated from this file via `posthog/scopes_projection.py`. Run
+# `hogli build:projections` to regenerate after editing it.
 APIScopeObject = Literal[
     "action",
     "access_control",
@@ -39,6 +39,7 @@ APIScopeObject = Literal[
     "comment",
     "conversation",
     "context_layer_internal",
+    "cross_project_dashboard",
     "customer_analytics",
     "customer_task",
     "customer_journey",
@@ -81,8 +82,8 @@ APIScopeObject = Literal[
     "interactive_run",
     "internal_run",
     "legal_document",
-    "link",
-    "live_debugger",
+    "link",  # Endpoints are gone; kept advertised until desktop OAuth clients stop requesting it.
+    "live_debugger",  # Endpoints are gone; kept advertised until desktop OAuth clients stop requesting it.
     "llm_analytics",
     "ai_observability_clusters",
     "llm_gateway",
